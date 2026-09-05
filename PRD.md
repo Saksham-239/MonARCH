@@ -63,7 +63,7 @@ Building a fully serverless, zero-idle-cost cloud analytics pipeline on AWS Free
 * **NFR-1.3 (Budget Protection):** Mandatory AWS Budget alert at $1.00 and $5.00 thresholds.
 
 ### 4.2 Latency, Packaging & Embedded Memory Boundaries
-* **NFR-2.1 (Cloud/Host Model):** The production model graph is compiled into an ONNX graph (`pi_mdcnet_edge.onnx`, ~318 KB, opset 14, ~78k parameters), capable of running on CPU inside AWS Lambda with single-sample inference latency **< 20 ms**.
+* **NFR-2.1 (Cloud/Host Model):** The production model graph is compiled into an ONNX graph (`pi_mdcnet_edge.onnx`, 318,034 bytes / ~318 KB, opset 14, 67,013 float32 parameters), capable of running on CPU inside AWS Lambda with single-sample inference latency **< 20 ms**.
 * **NFR-2.2 (Streaming BMS Persistent State):** Embedded C streaming state tracking operates with exactly **32 bytes** of persistent state (`pimdcnet_state_t`) and zero dynamic heap allocation, targeted for microcontrollers such as the ESP32-S3 (Xtensa LX7). (Note: 32 bytes refers strictly to persistent streaming state, not full on-device neural tensor inference).
 
 ### 4.3 Validation Rigor

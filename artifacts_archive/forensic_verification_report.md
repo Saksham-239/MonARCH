@@ -18,16 +18,11 @@ This forensic audit reviewed the entire PI-MDCNet codebase, raw NASA PCoE data f
    - **B0007:** 2.2 V cutoff (*corrected from 2.7 V*)
    - **B0018:** 2.5 V cutoff
 2. **Embedded Target Architecture:** Corrected "ARM Cortex-M" references for the ESP32-S3 target in `main.c`, `pi_mdcnet_inference.h`, and `export_onnx.py`. The ESP32-S3 utilizes a dual-core 32-bit **Xtensa LX7** processor.
-3. **Memory Footprint Disambiguation:** Disambiguated the "32-byte RAM" claim. Exactly 32 bytes corresponds solely to the persistent streaming BMS state structure (`pimdcnet_state_t`: `soh_0` [4B] + `D_prev` [4B] + `D_history[5]` [20B] + `cycle_count` [4B]). The full neural model graph (`pi_mdcnet_edge.onnx`) is 318,034 bytes (~318 KB, 67,013 float32 parameters). The C demonstration is an analytical streaming state-update engine with zero heap allocation, distinct from full on-device tensor execution.
+3. **Memory Footprint Disambiguation:** Disambiguated the "32-byte RAM" claim. Exactly 32 bytes corresponds solely to the persistent streaming BMS state structure (`pimdcnet_state_t`: `soh_0` [4B] + `D_prev` [4B] + `D_history[5]` [20B] + `cycle_count` [4B]). The full neural model graph (`pi_mdcnet_edge.onnx`) is ~318 KB (~78k parameters). The C demonstration is an analytical streaming state-update engine with zero heap allocation, distinct from full on-device tensor execution.
 4. **SoC Reference Truth Terminology:** Corrected claims describing retrospective Coulomb integration as "independently measured SoC ground truth." The target is a **retrospective cycle-normalized SoC reference** ($1 - q(t)/Q_{\text{cycle}}$), where $Q_{\text{cycle}}$ is strictly withheld from the model during inference ($[V(t), I(t), t]$ inputs only).
 5. **Stressor Conditioning Input Vector:** Confirmed that active model inputs for $s_t$ are strictly 2-dimensional: $[ \text{mean\_temp\_cycle}, \text{c\_rate} ]$. Claims that $s_t$ contains Depth-of-Discharge (DoD) were factually false and have been eliminated.
 6. **Cross-Attention Novelty Downgrade:** Ablation evidence reveals an isolated gain of only $0.0001$ RMSE ($0.0573 \pm 0.0138$ vs. $0.0574 \pm 0.0141$). Cross-attention is treated as an architectural fusion mechanism, not a primary performance driver.
 7. **Small-Sample Statistical Inference:** With $N=4$ battery trajectories (and $N=3$ valid EOL cells for RUL), formal statistical significance ($p < 0.05$) is mathematically impossible under the two-sided Wilcoxon signed-rank test (minimum possible $p = 0.125$ for $N=4$ and $p = 0.250$ for $N=3$). Repeated initializations (seeds) are not independent battery samples. All inferential statistics are reported as exploratory.
-8. **Macro SoH RMSE Variance Clarification:** PI-MDCNet achieves a mean macro SoH RMSE of **0.0573**. Two distinct standard deviations appear depending on aggregation level:
-   - **Across-fold cell variance ($\sigma_{\text{cell}} = 0.0099$):** Evaluates dispersion across the 4 physical Leave-One-Battery-Out test cells ($N=4$ cell fold means: B0005 = 0.0493, B0006 = 0.0715, B0007 = 0.0559, B0018 = 0.0522; sample standard deviation $\sigma_{\text{cell}} = 0.0099$). This measures generalization variability across physical batteries.
-   - **Total pooled run variance ($\sigma_{\text{pooled}} = 0.0138$):** Evaluates dispersion across all 12 individual experimental runs (4 LOBO folds $\times$ 3 stochastic training seeds 42, 43, 44; sample standard deviation $\sigma_{\text{pooled}} = 0.0138$). This combines both physical battery differences and seed-to-seed training variability.
-   - **Within-cell seed variance ($\bar{\sigma}_{\text{seed}} = 0.0088$):** The average standard deviation across seeds within the same test cell is small (B0005 = 0.0029, B0006 = 0.0063, B0007 = 0.0237, B0018 = 0.0026; mean within-cell seed $\bar{\sigma}_{\text{seed}} = 0.0088$, or $\bar{\sigma}_{\text{seed}} = 0.0039$ across the 3 EOL failure cells).
-   - **Reporting Standard:** To eliminate ambiguous side-by-side figures (e.g. "0.0573 ± 0.0099 (0.0573 ± 0.0138)"), this report standardizes on **a single canonically labeled figure: $0.0573 \pm 0.0138$ (pooled over 12 runs: 4 folds × 3 seeds)**, matching `comparison_table.csv` and `ablation_table.csv`.
 
 ---
 
@@ -53,9 +48,9 @@ This forensic audit reviewed the entire PI-MDCNet codebase, raw NASA PCoE data f
 | **C-16** | Causal RUL extrapolation from $D_t$ | **VERIFIED** | `rul_validation.py`: At cycle $t$, only $D_0 \dots D_t$ are passed to polyfit; no future capacity information leaks. | Retain causality claim; document that slope estimation uses only past window $[t-k+1, t]$. | Polynomial slope can be sensitive to window size $k$. |
 | **C-17** | Latent-$D_t$ RUL universally outperforms baselines | **FALSE** | `eval_rul_cell_breakdown.py`: Beats RF/XGB on B0005 (4.94 vs 9.20) and B0018 (7.35 vs 20.53), but loses on B0006 (16.99 vs 8.77/8.27). | State: Effective on accelerating-knee trajectory (B0005), but does not uniformly outperform simpler baselines across all cells. | 2 wins, 1 loss vs. tree baselines across valid EOL cells. |
 | **C-18** | B0007 right-censoring at 1.40 Ah EOL | **VERIFIED** | `data_loader.py` & `B0007.mat`: Minimum capacity is 1.4005 Ah > 1.40 Ah. Never reaches 70% EOL. | Exclude B0007 from failure-time RUL metrics; retain for macro SoH evaluation. | Right-censored cell cannot validate end-of-life forecasting. |
-| **C-19** | Monotonicity ablation causes 203% error explosion | **VERIFIED** | `ablation_table.csv`: Full SLAC = $0.0573 \pm 0.0138$, NoMono = $0.1739 \pm 0.1342$ ($+203.5\%$ rounded / $+203.8\%$ unrounded, 0/12 monotonic). | Report exact percentage ($+203.5\%$); phrase as empirical benchmark finding, not universal physical proof. | Tested on 4 LOBO folds with 3 seeds. |
+| **C-19** | Monotonicity ablation causes 203% error explosion | **VERIFIED** | `ablation_table.csv`: Full SLAC = $0.0573 \pm 0.0138$, NoMono = $0.1739 \pm 0.1342$ ($+203.49\%$, 0/12 monotonic). | Report exact percentage ($+203.5\%$); phrase as empirical benchmark finding, not universal physical proof. | Tested on 4 LOBO folds with 3 seeds. |
 | **C-20** | Statistically significant superiority ($p < 0.05$) | **FALSE** | Two-sided Wilcoxon signed-rank test has minimum possible $p = 0.125$ ($N=4$) and $p = 0.250$ ($N=3$). | Prohibit claims of formal statistical significance; treat repeated runs as stochastic seeds, not independent cells. | Fundamental small-$N$ benchmark constraint. |
-| **C-21** | 32 bytes RAM runs the entire neural network | **FALSE** | `pi_mdcnet_inference.h`: `sizeof(pimdcnet_state_t)` = 32 bytes. ONNX model is 318,034 bytes (~318 KB); parameters are 67,013 float32 (~67k). | Define 32 bytes strictly as persistent streaming BMS state; distinguish C demo from on-device neural tensor inference. | C code demonstrates state lifecycle, not on-device tensor runtime. |
+| **C-21** | 32 bytes RAM runs the entire neural network | **FALSE** | `pi_mdcnet_inference.h`: `sizeof(pimdcnet_state_t)` = 32 bytes. ONNX model is ~318 KB; parameters are ~78k float32. | Define 32 bytes strictly as persistent streaming BMS state; distinguish C demo from on-device neural tensor inference. | C code demonstrates state lifecycle, not on-device tensor runtime. |
 | **C-22** | ESP32-S3 uses ARM Cortex-M architecture | **FALSE** | ESP32-S3 hardware specification uses dual-core 32-bit Tensilica **Xtensa LX7**. | Correct every instance to "ESP32-S3 / Xtensa LX7". Avoid conflation with RP2040 (ARM Cortex-M0+). | Hardware naming correction. |
 
 ---
@@ -172,7 +167,7 @@ The macro degradation state is compressed into a 32-byte persistent struct (`pim
 > **Answer:** "No, and we have explicitly corrected that terminology in our documentation. It is not an independent physical state measurement like chemical titration or an embedded reference electrode. It is a retrospective cycle-normalized reference derived from trapezoidal Coulomb integration using the observed total discharge capacity of that specific cycle: $1 - q(t)/Q_{\text{cycle}}$. Crucially, $Q_{\text{cycle}}$ is withheld from the model during inference; the GRU receives only high-frequency voltage, current, and elapsed time."
 
 ### Q8: "Does your 32-byte claim mean the entire neural network fits in 32 bytes?"
-> **Answer:** "No. The neural network artifact (`pi_mdcnet_edge.onnx`) is 318,034 bytes (~318 KB) with 67,013 float32 parameters (~67k). The 32 bytes refers strictly to the persistent streaming BMS state structure (`pimdcnet_state_t`), which holds four fields across cycles: initial SoH (4 bytes), previous damage $D_{t-1}$ (4 bytes), a rolling 5-cycle damage buffer (20 bytes), and a cycle counter (4 bytes). Total: exactly 32 bytes."
+> **Answer:** "No. The neural network artifact (`pi_mdcnet_edge.onnx`) is approximately 318 KB with ~78,000 float32 parameters. The 32 bytes refers strictly to the persistent streaming BMS state structure (`pimdcnet_state_t`), which holds four fields across cycles: initial SoH (4 bytes), previous damage $D_{t-1}$ (4 bytes), a rolling 5-cycle damage buffer (20 bytes), and a cycle counter (4 bytes). Total: exactly 32 bytes."
 
 ### Q9: "Is your embedded demo actually executing the learned neural network?"
 > **Answer:** "The pure C code in `embedded/esp32/` is an analytical streaming state harness with representative degradation and relaxation closures designed to validate the 32-byte persistent state lifecycle, timing, and zero-heap execution on microcontrollers like the ESP32-S3 (Xtensa LX7). Full neural tensor inference is executed via ONNX Runtime, which compiles the graph to CPU inside AWS Lambda or an edge gateway."
@@ -206,7 +201,7 @@ The macro degradation state is compressed into a 32-byte persistent struct (`pim
 • NASA cutoff voltages are B0005=2.7V, B0006=2.5V, B0007=2.2V, B0018=2.5V.
 • Persistent streaming BMS state footprint is exactly 32 bytes (pimdcnet_state_t) with zero heap allocation.
 • ESP32-S3 target processor is the dual-core 32-bit Xtensa LX7.
-• ONNX streaming model artifact size is 318,034 bytes (~318 KB) with 67,013 parameters (~67k).
+• ONNX streaming model artifact size is ~318 KB with ~78k parameters.
 • Sequential PyTorch vs. ONNX Runtime numerical parity is verified (< 1.19e-07 max absolute diff).
 
 🟡 YELLOW — State Only with Qualification (Context-Dependent / Mixed Evidence)
@@ -245,7 +240,7 @@ The macro degradation state is compressed into a 32-byte persistent struct (`pim
 ```powershell
 .venv\Scripts\pytest -o pythonpath=. tests
 ```
-* **Result:** `12 passed in 10.01s`
+* **Result:** `12 passed in 38.99s`
 * **Coverage:** Baselines (`test_baselines.py`), Data Loader (`test_data_loader.py`), Statistical Evaluation (`test_evaluate.py`), SLAC Architecture (`test_pi_mdcnet.py`).
 * **Status:** **PASS**
 
@@ -396,54 +391,6 @@ And for B0005:
 | **B0006** (decelerating) | **16.99 ± 2.60** | 8.77 ± 0.05 | 8.27 ± 0.32 | 23.51 ± 0.95 | 4.98 ± 0.00 | 7.73 ± 0.00 | **LOSS** (loses to tree baselines) |
 | **B0018** (linear degradation) | **7.35 ± 4.10** | 20.53 ± 0.29 | 20.23 ± 0.25 | 23.35 ± 0.51 | 6.60 ± 0.00 | 5.80 ± 0.00 | **WIN** (~64% lower MAE than trees) |
 | **B0007** (right-censored) | *NaN* | *NaN* | *NaN* | *NaN* | *NaN* | *NaN* | *Right-censored (min cap 1.4005 Ah > 1.40 Ah)* |
-
-### 7.6 Canonical SoH Macro Benchmark & Formal Variance Decomposition
-
-#### 1. Macro SoH Performance across All Models (`artifacts/comparison_table.csv`)
-
-| Model | SoH RMSE (mean ± pooled std) | SoH MAE (mean ± pooled std) | RUL MAE (cycles, failure cells) | Monotonic Damage Rate |
-| :--- | :---: | :---: | :---: | :---: |
-| **RandomForest** | 0.0300 ± 0.0066 | 0.0251 ± 0.0058 | 12.84 ± 5.78 | ❌ (Unconstrained tabular) |
-| **XGBoost** | 0.0306 ± 0.0076 | 0.0258 ± 0.0069 | 12.57 ± 5.78 | ❌ (Unconstrained tabular) |
-| **VanillaLSTM** | 0.0444 ± 0.0132 | 0.0360 ± 0.0119 | *NaN* (No RUL head) | ❌ (Unconstrained recurrent) |
-| **PI-MDCNet (Full SLAC)** | 0.0573 ± 0.0138 | 0.0459 ± 0.0110 | 30.54 ± 4.76 (direct head) / **9.76 ± 6.04** (latent-$D_t$) | ✔️ (Architectural guarantee) |
-| **StatDecomp** | 0.1091 ± 0.0112 | 0.0896 ± 0.0041 | 11.33 ± 0.00 | ⚠️ (Statistical heuristic) |
-
-*Note: For PI-MDCNet, direct neural RUL head achieves 30.54 ± 4.76 MAE across failure cells, while causal latent-$D_t$ extrapolation achieves 9.76 ± 6.04 MAE (and 4.94 ± 0.34 on B0005).*
-
-#### 2. Full Architectural Ablation Study (`artifacts/ablation_table.csv`)
-
-| Model Variant | SoH RMSE (mean ± pooled std) | SoH MAE (mean ± pooled std) | Monotonic Test Runs | Max Violation | Δ SoH RMSE vs Full SLAC |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Full SLAC** | **0.0573 ± 0.0138** | **0.0459 ± 0.0110** | **12 / 12 (100%)** | $+0.001350$ | Baseline ($0.00\%$) |
-| **Ablation_NoCrossAttn** | 0.0574 ± 0.0141 | 0.0462 ± 0.0111 | 12 / 12 (100%) | $+0.001352$ | $+0.0001$ ($+0.20\%$) |
-| **Ablation_NoHardGating** | 0.0596 ± 0.0197 | 0.0478 ± 0.0149 | 12 / 12 (100%) | $+0.001239$ | $+0.0023$ ($+4.01\%$) |
-| **Ablation_NoMonotonicity** | 0.1739 ± 0.1342 | 0.1463 ± 0.1117 | 0 / 12 (0%) | $-0.091053$ | **$+0.1166$ (+203.5% / +203.8% unrounded)** |
-
-#### 3. Formal Variance Decomposition for PI-MDCNet Macro SoH RMSE
-
-To resolve ambiguity between historical citations of `0.0573 ± 0.0099` and `0.0573 ± 0.0138`:
-
-1. **Across-Fold Cell Variance ($\sigma_{\text{cell}} = 0.0099$):**
-   - Each LOBO fold isolates one complete physical battery cell ($N=4$).
-   - Cell fold means across the 3 seeds:
-     - **B0005:** $0.0493 \pm 0.0029$
-     - **B0006:** $0.0715 \pm 0.0063$
-     - **B0007:** $0.0559 \pm 0.0237$
-     - **B0018:** $0.0522 \pm 0.0026$
-   - Mean of cell fold means = **0.0573**
-   - Sample standard deviation of the 4 cell means ($N=4$, $ddof=1$): $\sigma_{\text{cell}} = \mathbf{0.0099}$
-   - *Interpretation:* Measures physical generalizability across distinct battery cells.
-
-2. **Total Pooled Run Variance ($\sigma_{\text{pooled}} = 0.0138$):**
-   - Total individual experimental runs: $4\text{ folds} \times 3\text{ seeds} = 12\text{ runs}$.
-   - Sample standard deviation across all 12 entries ($N=12$, $ddof=1$): $\sigma_{\text{pooled}} = \mathbf{0.0138}$
-   - *Interpretation:* Captures total experimental variance (cell-to-cell differences combined with stochastic training initialization).
-
-3. **Within-Cell Seed Variance ($\bar{\sigma}_{\text{seed}} = 0.0088$):**
-   - Average standard deviation across seeds for the same cell is $0.0088$ (and $0.0039$ across the 3 failure cells). Stochastic seed variation is secondary to cross-cell physical divergence.
-
-**Canonical Standard Adopted in Report:** All primary tables report the pooled run standard deviation **$0.0573 \pm 0.0138$ (pooled over 12 runs: 4 folds × 3 seeds)**, matching the exact CSV files on disk. Single numbers are always explicitly labeled with their aggregation scope.
 
 ---
 

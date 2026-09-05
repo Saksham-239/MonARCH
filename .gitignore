@@ -33,3 +33,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Temporary agent scratch files
+scratch/
