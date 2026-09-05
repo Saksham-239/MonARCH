@@ -18,11 +18,16 @@ This forensic audit reviewed the entire PI-MDCNet codebase, raw NASA PCoE data f
    - **B0007:** 2.2 V cutoff (*corrected from 2.7 V*)
    - **B0018:** 2.5 V cutoff
 2. **Embedded Target Architecture:** Corrected "ARM Cortex-M" references for the ESP32-S3 target in `main.c`, `pi_mdcnet_inference.h`, and `export_onnx.py`. The ESP32-S3 utilizes a dual-core 32-bit **Xtensa LX7** processor.
-3. **Memory Footprint Disambiguation:** Disambiguated the "32-byte RAM" claim. Exactly 32 bytes corresponds solely to the persistent streaming BMS state structure (`pimdcnet_state_t`: `soh_0` [4B] + `D_prev` [4B] + `D_history[5]` [20B] + `cycle_count` [4B]). The full neural model graph (`pi_mdcnet_edge.onnx`) is ~318 KB (~78k parameters). The C demonstration is an analytical streaming state-update engine with zero heap allocation, distinct from full on-device tensor execution.
+3. **Memory Footprint Disambiguation:** Disambiguated the "32-byte RAM" claim. Exactly 32 bytes corresponds solely to the persistent streaming BMS state structure (`pimdcnet_state_t`: `soh_0` [4B] + `D_prev` [4B] + `D_history[5]` [20B] + `cycle_count` [4B]). The full neural model graph (`pi_mdcnet_edge.onnx`) is 318,034 bytes (~318 KB, 67,013 float32 parameters). The C demonstration is an analytical streaming state-update engine with zero heap allocation, distinct from full on-device tensor execution.
 4. **SoC Reference Truth Terminology:** Corrected claims describing retrospective Coulomb integration as "independently measured SoC ground truth." The target is a **retrospective cycle-normalized SoC reference** ($1 - q(t)/Q_{\text{cycle}}$), where $Q_{\text{cycle}}$ is strictly withheld from the model during inference ($[V(t), I(t), t]$ inputs only).
 5. **Stressor Conditioning Input Vector:** Confirmed that active model inputs for $s_t$ are strictly 2-dimensional: $[ \text{mean\_temp\_cycle}, \text{c\_rate} ]$. Claims that $s_t$ contains Depth-of-Discharge (DoD) were factually false and have been eliminated.
 6. **Cross-Attention Novelty Downgrade:** Ablation evidence reveals an isolated gain of only $0.0001$ RMSE ($0.0573 \pm 0.0138$ vs. $0.0574 \pm 0.0141$). Cross-attention is treated as an architectural fusion mechanism, not a primary performance driver.
 7. **Small-Sample Statistical Inference:** With $N=4$ battery trajectories (and $N=3$ valid EOL cells for RUL), formal statistical significance ($p < 0.05$) is mathematically impossible under the two-sided Wilcoxon signed-rank test (minimum possible $p = 0.125$ for $N=4$ and $p = 0.250$ for $N=3$). Repeated initializations (seeds) are not independent battery samples. All inferential statistics are reported as exploratory.
+8. **Macro SoH RMSE Variance Clarification:** PI-MDCNet achieves a mean macro SoH RMSE of **0.0573**. Two distinct standard deviations appear depending on aggregation level:
+   - **Across-fold cell variance ($\sigma_{\text{cell}} = 0.0099$):** Evaluates dispersion across the 4 physical Leave-One-Battery-Out test cells ($N=4$ cell fold means: B0005 = 0.0493, B0006 = 0.0715, B0007 = 0.0559, B0018 = 0.0522; sample standard deviation $\sigma_{\text{cell}} = 0.0099$). This measures generalization variability across physical batteries.
+   - **Total pooled run variance ($\sigma_{\text{pooled}} = 0.0138$):** Evaluates dispersion across all 12 individual experimental runs (4 LOBO folds $\times$ 3 stochastic training seeds 42, 43, 44; sample standard deviation $\sigma_{\text{pooled}} = 0.0138$). This combines both physical battery differences and seed-to-seed training variability.
+   - **Within-cell seed variance ($\bar{\sigma}_{\text{seed}} = 0.0088$):** The average standard deviation across seeds within the same test cell is small (B0005 = 0.0029, B0006 = 0.0063, B0007 = 0.0237, B0018 = 0.0026; mean within-cell seed $\bar{\sigma}_{\text{seed}} = 0.0088$, or $\bar{\sigma}_{\text{seed}} = 0.0039$ across the 3 EOL failure cells).
+   - **Reporting Standard:** To eliminate ambiguous side-by-side figures (e.g. "0.0573 ± 0.0099 (0.0573 ± 0.0138)"), this report standardizes on **a single canonically labeled figure: $0.0573 \pm 0.0138$ (pooled over 12 runs: 4 folds × 3 seeds)**, matching `comparison_table.csv` and `ablation_table.csv`.
 
 ---
 
@@ -48,9 +53,9 @@ This forensic audit reviewed the entire PI-MDCNet codebase, raw NASA PCoE data f
 | **C-16** | Causal RUL extrapolation from $D_t$ | **VERIFIED** | `rul_validation.py`: At cycle $t$, only $D_0 \dots D_t$ are passed to polyfit; no future capacity information leaks. | Retain causality claim; document that slope estimation uses only past window $[t-k+1, t]$. | Polynomial slope can be sensitive to window size $k$. |
 | **C-17** | Latent-$D_t$ RUL universally outperforms baselines | **FALSE** | `eval_rul_cell_breakdown.py`: Beats RF/XGB on B0005 (4.94 vs 9.20) and B0018 (7.35 vs 20.53), but loses on B0006 (16.99 vs 8.77/8.27). | State: Effective on accelerating-knee trajectory (B0005), but does not uniformly outperform simpler baselines across all cells. | 2 wins, 1 loss vs. tree baselines across valid EOL cells. |
 | **C-18** | B0007 right-censoring at 1.40 Ah EOL | **VERIFIED** | `data_loader.py` & `B0007.mat`: Minimum capacity is 1.4005 Ah > 1.40 Ah. Never reaches 70% EOL. | Exclude B0007 from failure-time RUL metrics; retain for macro SoH evaluation. | Right-censored cell cannot validate end-of-life forecasting. |
-| **C-19** | Monotonicity ablation causes 203% error explosion | **VERIFIED** | `ablation_table.csv`: Full SLAC = $0.0573 \pm 0.0138$, NoMono = $0.1739 \pm 0.1342$ ($+203.49\%$, 0/12 monotonic). | Report exact percentage ($+203.5\%$); phrase as empirical benchmark finding, not universal physical proof. | Tested on 4 LOBO folds with 3 seeds. |
+| **C-19** | Monotonicity ablation causes 203% error explosion | **VERIFIED** | `ablation_table.csv`: Full SLAC = $0.0573 \pm 0.0138$, NoMono = $0.1739 \pm 0.1342$ ($+203.5\%$ rounded / $+203.8\%$ unrounded, 0/12 monotonic). | Report exact percentage ($+203.5\%$); phrase as empirical benchmark finding, not universal physical proof. | Tested on 4 LOBO folds with 3 seeds. |
 | **C-20** | Statistically significant superiority ($p < 0.05$) | **FALSE** | Two-sided Wilcoxon signed-rank test has minimum possible $p = 0.125$ ($N=4$) and $p = 0.250$ ($N=3$). | Prohibit claims of formal statistical significance; treat repeated runs as stochastic seeds, not independent cells. | Fundamental small-$N$ benchmark constraint. |
-| **C-21** | 32 bytes RAM runs the entire neural network | **FALSE** | `pi_mdcnet_inference.h`: `sizeof(pimdcnet_state_t)` = 32 bytes. ONNX model is ~318 KB; parameters are ~78k float32. | Define 32 bytes strictly as persistent streaming BMS state; distinguish C demo from on-device neural tensor inference. | C code demonstrates state lifecycle, not on-device tensor runtime. |
+| **C-21** | 32 bytes RAM runs the entire neural network | **FALSE** | `pi_mdcnet_inference.h`: `sizeof(pimdcnet_state_t)` = 32 bytes. ONNX model is 318,034 bytes (~318 KB); parameters are 67,013 float32 (~67k). | Define 32 bytes strictly as persistent streaming BMS state; distinguish C demo from on-device neural tensor inference. | C code demonstrates state lifecycle, not on-device tensor runtime. |
 | **C-22** | ESP32-S3 uses ARM Cortex-M architecture | **FALSE** | ESP32-S3 hardware specification uses dual-core 32-bit Tensilica **Xtensa LX7**. | Correct every instance to "ESP32-S3 / Xtensa LX7". Avoid conflation with RP2040 (ARM Cortex-M0+). | Hardware naming correction. |
 
 ---
@@ -109,7 +114,7 @@ The operational stressor vector $s_t = [\text{mean\_temp\_cycle}, \text{c\_rate}
 
 ### Fourth Contribution (Tier 4)
 **Causal Damage-Latent RUL Extrapolation:**
-Extrapolating Remaining Useful Life from the smoothed, monotonic latent damage trajectory $D_t$ rather than noisy, rebound-contaminated raw capacity. On cell B0005, which exhibits an accelerating degradation knee (acceleration ratio $1.67\times$), latent-$D_t$ extrapolation achieves 4.94 cycles MAE (compared to 84.60 cycles for raw extrapolation, 9.20 for Random Forest, and 9.21 for XGBoost). However, on cell B0006 (acceleration ratio $0.42\times$), it achieves 16.99 cycles MAE, losing to simpler tree baselines.
+Extrapolating Remaining Useful Life from the smoothed, monotonic latent damage trajectory $D_t$ rather than noisy, rebound-contaminated capacity traces. On cell B0005, which exhibits an accelerating degradation knee (acceleration ratio $1.67\times$), latent-$D_t$ extrapolation achieves 4.94 cycles MAE, reducing error by ~46% compared to strong tree ensembles (9.20 for Random Forest, 9.21 for XGBoost). However, on cell B0006, which exhibits decelerating degradation (acceleration ratio $0.42\times$), latent-$D_t$ extrapolation yields 16.99 cycles MAE, losing to tree baselines (8.77 for Random Forest, 8.27 for XGBoost).
 
 ### Engineering Contribution (Tier 5)
 **Streaming BMS Persistent-State Architecture:**
@@ -167,13 +172,13 @@ The macro degradation state is compressed into a 32-byte persistent struct (`pim
 > **Answer:** "No, and we have explicitly corrected that terminology in our documentation. It is not an independent physical state measurement like chemical titration or an embedded reference electrode. It is a retrospective cycle-normalized reference derived from trapezoidal Coulomb integration using the observed total discharge capacity of that specific cycle: $1 - q(t)/Q_{\text{cycle}}$. Crucially, $Q_{\text{cycle}}$ is withheld from the model during inference; the GRU receives only high-frequency voltage, current, and elapsed time."
 
 ### Q8: "Does your 32-byte claim mean the entire neural network fits in 32 bytes?"
-> **Answer:** "No. The neural network artifact (`pi_mdcnet_edge.onnx`) is approximately 318 KB with ~78,000 float32 parameters. The 32 bytes refers strictly to the persistent streaming BMS state structure (`pimdcnet_state_t`), which holds four fields across cycles: initial SoH (4 bytes), previous damage $D_{t-1}$ (4 bytes), a rolling 5-cycle damage buffer (20 bytes), and a cycle counter (4 bytes). Total: exactly 32 bytes."
+> **Answer:** "No. The neural network artifact (`pi_mdcnet_edge.onnx`) is 318,034 bytes (~318 KB) with 67,013 float32 parameters (~67k). The 32 bytes refers strictly to the persistent streaming BMS state structure (`pimdcnet_state_t`), which holds four fields across cycles: initial SoH (4 bytes), previous damage $D_{t-1}$ (4 bytes), a rolling 5-cycle damage buffer (20 bytes), and a cycle counter (4 bytes). Total: exactly 32 bytes."
 
 ### Q9: "Is your embedded demo actually executing the learned neural network?"
 > **Answer:** "The pure C code in `embedded/esp32/` is an analytical streaming state harness with representative degradation and relaxation closures designed to validate the 32-byte persistent state lifecycle, timing, and zero-heap execution on microcontrollers like the ESP32-S3 (Xtensa LX7). Full neural tensor inference is executed via ONNX Runtime, which compiles the graph to CPU inside AWS Lambda or an edge gateway."
 
 ### Q10: "Why is your RUL model better on B0005 but worse on B0006?"
-> **Answer:** "The degradation dynamics of the two cells are fundamentally different. B0005 exhibits an accelerating degradation knee near end-of-life, with a late-to-early degradation slope ratio of $1.67\times$. The monotonic latent damage rate accelerates into the knee, allowing linear extrapolation on $D_t$ to anticipate failure with 4.94 cycles MAE (vs. 84.60 for raw extrapolation). In contrast, B0006 is a decelerating trajectory with an acceleration ratio of $0.42\times$ (late slope is slower than early slope). On decelerating trajectories, our extrapolation overestimates degradation velocity, resulting in 16.99 cycles MAE where simple linear extrapolation (7.73) and tree models (8.27) perform better. We present this openly as an honest limitation: latent damage extrapolation excels on accelerating knees, but not uniformly across all degradation shapes."
+> **Answer:** "The degradation dynamics of the two cells are fundamentally different. B0005 exhibits an accelerating degradation knee near end-of-life, with a late-to-early degradation slope ratio of $1.67\times$. The monotonic latent damage rate accelerates into the knee, allowing linear extrapolation on $D_t$ to anticipate failure with 4.94 cycles MAE (a ~46% error reduction compared to Random Forest at 9.20 and XGBoost at 9.21). In contrast, B0006 is a decelerating trajectory with an acceleration ratio of $0.42\times$ (late slope is slower than early slope). On decelerating trajectories, our extrapolation overestimates degradation velocity, resulting in 16.99 cycles MAE where simple linear extrapolation (7.73) and tree models (8.27) perform better. We present this openly as an honest limitation: latent damage extrapolation excels on accelerating knees, but not uniformly across all degradation shapes."
 
 ### Q11: "Where is the evidence that your model generalizes to other batteries or chemistries?"
 > **Answer:** "There is currently no external evidence. The model has been validated exclusively on the 4-cell NASA PCoE dataset (LiCoO2 chemistry). We have not yet validated on Oxford, CALCE, or Stanford datasets. Cross-chemistry and cross-protocol generalization remains unproven future work, and we state this explicitly as a limitation in the paper."
@@ -201,7 +206,7 @@ The macro degradation state is compressed into a 32-byte persistent struct (`pim
 • NASA cutoff voltages are B0005=2.7V, B0006=2.5V, B0007=2.2V, B0018=2.5V.
 • Persistent streaming BMS state footprint is exactly 32 bytes (pimdcnet_state_t) with zero heap allocation.
 • ESP32-S3 target processor is the dual-core 32-bit Xtensa LX7.
-• ONNX streaming model artifact size is ~318 KB with ~78k parameters.
+• ONNX streaming model artifact size is 318,034 bytes (~318 KB) with 67,013 parameters (~67k).
 • Sequential PyTorch vs. ONNX Runtime numerical parity is verified (< 1.19e-07 max absolute diff).
 
 🟡 YELLOW — State Only with Qualification (Context-Dependent / Mixed Evidence)
@@ -240,7 +245,7 @@ The macro degradation state is compressed into a 32-byte persistent struct (`pim
 ```powershell
 .venv\Scripts\pytest -o pythonpath=. tests
 ```
-* **Result:** `12 passed in 38.99s`
+* **Result:** `12 passed in 10.01s`
 * **Coverage:** Baselines (`test_baselines.py`), Data Loader (`test_data_loader.py`), Statistical Evaluation (`test_evaluate.py`), SLAC Architecture (`test_pi_mdcnet.py`).
 * **Status:** **PASS**
 
@@ -314,9 +319,135 @@ gcc -Wall -Wextra -O2 embedded/esp32/main/main.c embedded/esp32/main/pi_mdcnet_i
   - vs. `Stat_Decomp`: 1 Win, 2 Losses (Decisive win on B0005 knee)
 * **Status:** **PASS**
 
+### 7.5 Canonical Reconciliation: `eval_rul_cell_breakdown.py` vs. `comparison_table.csv`
+
+#### 1. Raw Data Straight from `artifacts/comparison_table.csv` (Off Disk, Unrounded)
+
+```text
+           model   fold  seed    rul_mae   rul_rmse
+27  RandomForest  B0006    42   8.827022  13.532433
+28  RandomForest  B0006    43   8.773892  13.415782
+29  RandomForest  B0006    44   8.718071  13.369190
+30       XGBoost  B0006    42   8.621956  12.522845
+31       XGBoost  B0006    43   8.009653  11.807747
+32       XGBoost  B0006    44   8.176432  12.114502
+69  RandomForest  B0018    42  20.225496  24.438627
+70  RandomForest  B0018    43  20.811824  25.244387
+71  RandomForest  B0018    44  20.567422  24.990810
+72       XGBoost  B0018    42  20.370591  24.680917
+73       XGBoost  B0018    43  20.366960  24.293268
+74       XGBoost  B0018    44  19.938331  24.031210
+```
+
+And for B0005:
+```text
+           model   fold  seed    rul_mae   rul_rmse
+6   RandomForest  B0005    42   9.191826  12.121400
+7   RandomForest  B0005    43   9.131524  12.287541
+8   RandomForest  B0005    44   9.271378  12.489001
+9        XGBoost  B0005    42   8.633929  13.160493
+10       XGBoost  B0005    43   8.831627  13.720503
+11       XGBoost  B0005    44  10.171041  15.306619
+```
+
+#### 2 & 3. Code Path Investigation & Line Diff
+
+* **The Script that WROTE `comparison_table.csv`:**
+  - File: `experiments/train.py`
+  - Write Call (Line 597): `results_df.to_csv(output_dir / "comparison_table.csv", index=False)`
+  - Evaluation Lines:
+    ```python
+    # Line 538 in train.py:
+    rul_m = compute_metrics(test_df["rul"].values, result.rul, "rul_")
+
+    # Line 148 in train.py (inside compute_metrics):
+    mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    mae = float(np.mean(np.abs(yt - yp)))
+    ```
+    `train.py` evaluates all cycles from cycle $t=0$ to the end of test data without discarding warm-up cycles (`burn_in = 0`).
+
+* **The Script `eval_rul_cell_breakdown.py`:**
+  - File: `experiments/eval_rul_cell_breakdown.py`
+  - Lines 9–10 & 44:
+    ```python
+    df_rul = pd.read_csv("artifacts/rul_validation_results.csv")
+    df_comp = pd.read_csv("artifacts/comparison_table.csv")
+    ...
+    v = sub_comp[sub_comp["model"] == tm]["rul_mae"].dropna()
+    ```
+    `eval_rul_cell_breakdown.py` reads `RandomForest` and `XGBoost` directly from `artifacts/comparison_table.csv`.
+
+* **Direct Truth on 6.85 and 22.72:**
+  Neither 6.85 nor 22.72 exists anywhere in this codebase, git history, or generated CSV artifacts. In `comparison_table.csv`, the unrounded values on disk are:
+  - B0006: RF = 8.7730, XGBoost = 8.2693
+  - B0018: RF = 20.5349, XGBoost = 20.2253
+  - B0005: RF = 9.1982, XGBoost = 9.2122
+
+  When `eval_rul_cell_breakdown.py` runs, it outputs these exact values:
+  - B0006: RF = 8.77 ± 0.05, XGBoost = 8.27 ± 0.32
+  - B0018: RF = 20.53 ± 0.29, XGBoost = 20.23 ± 0.25
+  - B0005: RF = 9.20 ± 0.07, XGBoost = 9.21 ± 0.84
+
+#### 4. Single Final Canonical Benchmark Table (One Value Per Cell)
+
+| Cell ID | Latent-$D_t$ Extrap | Random Forest | XGBoost | Neural RUL Head | StatDecomp | Raw SoH Extrap | Latent-$D_t$ vs Trees Outcome |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **B0005** (accelerating knee) | **4.94 ± 0.34** | 9.20 ± 0.07 | 9.21 ± 0.84 | 32.49 ± 0.93 | 70.49 ± 0.00 | 84.60 ± 0.00 | **WIN** (~46% lower MAE than trees) |
+| **B0006** (decelerating) | **16.99 ± 2.60** | 8.77 ± 0.05 | 8.27 ± 0.32 | 23.51 ± 0.95 | 4.98 ± 0.00 | 7.73 ± 0.00 | **LOSS** (loses to tree baselines) |
+| **B0018** (linear degradation) | **7.35 ± 4.10** | 20.53 ± 0.29 | 20.23 ± 0.25 | 23.35 ± 0.51 | 6.60 ± 0.00 | 5.80 ± 0.00 | **WIN** (~64% lower MAE than trees) |
+| **B0007** (right-censored) | *NaN* | *NaN* | *NaN* | *NaN* | *NaN* | *NaN* | *Right-censored (min cap 1.4005 Ah > 1.40 Ah)* |
+
+### 7.6 Canonical SoH Macro Benchmark & Formal Variance Decomposition
+
+#### 1. Macro SoH Performance across All Models (`artifacts/comparison_table.csv`)
+
+| Model | SoH RMSE (mean ± pooled std) | SoH MAE (mean ± pooled std) | RUL MAE (cycles, failure cells) | Monotonic Damage Rate |
+| :--- | :---: | :---: | :---: | :---: |
+| **RandomForest** | 0.0300 ± 0.0066 | 0.0251 ± 0.0058 | 12.84 ± 5.78 | ❌ (Unconstrained tabular) |
+| **XGBoost** | 0.0306 ± 0.0076 | 0.0258 ± 0.0069 | 12.57 ± 5.78 | ❌ (Unconstrained tabular) |
+| **VanillaLSTM** | 0.0444 ± 0.0132 | 0.0360 ± 0.0119 | *NaN* (No RUL head) | ❌ (Unconstrained recurrent) |
+| **PI-MDCNet (Full SLAC)** | 0.0573 ± 0.0138 | 0.0459 ± 0.0110 | 30.54 ± 4.76 (direct head) / **9.76 ± 6.04** (latent-$D_t$) | ✔️ (Architectural guarantee) |
+| **StatDecomp** | 0.1091 ± 0.0112 | 0.0896 ± 0.0041 | 11.33 ± 0.00 | ⚠️ (Statistical heuristic) |
+
+*Note: For PI-MDCNet, direct neural RUL head achieves 30.54 ± 4.76 MAE across failure cells, while causal latent-$D_t$ extrapolation achieves 9.76 ± 6.04 MAE (and 4.94 ± 0.34 on B0005).*
+
+#### 2. Full Architectural Ablation Study (`artifacts/ablation_table.csv`)
+
+| Model Variant | SoH RMSE (mean ± pooled std) | SoH MAE (mean ± pooled std) | Monotonic Test Runs | Max Violation | Δ SoH RMSE vs Full SLAC |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Full SLAC** | **0.0573 ± 0.0138** | **0.0459 ± 0.0110** | **12 / 12 (100%)** | $+0.001350$ | Baseline ($0.00\%$) |
+| **Ablation_NoCrossAttn** | 0.0574 ± 0.0141 | 0.0462 ± 0.0111 | 12 / 12 (100%) | $+0.001352$ | $+0.0001$ ($+0.20\%$) |
+| **Ablation_NoHardGating** | 0.0596 ± 0.0197 | 0.0478 ± 0.0149 | 12 / 12 (100%) | $+0.001239$ | $+0.0023$ ($+4.01\%$) |
+| **Ablation_NoMonotonicity** | 0.1739 ± 0.1342 | 0.1463 ± 0.1117 | 0 / 12 (0%) | $-0.091053$ | **$+0.1166$ (+203.5% / +203.8% unrounded)** |
+
+#### 3. Formal Variance Decomposition for PI-MDCNet Macro SoH RMSE
+
+To resolve ambiguity between historical citations of `0.0573 ± 0.0099` and `0.0573 ± 0.0138`:
+
+1. **Across-Fold Cell Variance ($\sigma_{\text{cell}} = 0.0099$):**
+   - Each LOBO fold isolates one complete physical battery cell ($N=4$).
+   - Cell fold means across the 3 seeds:
+     - **B0005:** $0.0493 \pm 0.0029$
+     - **B0006:** $0.0715 \pm 0.0063$
+     - **B0007:** $0.0559 \pm 0.0237$
+     - **B0018:** $0.0522 \pm 0.0026$
+   - Mean of cell fold means = **0.0573**
+   - Sample standard deviation of the 4 cell means ($N=4$, $ddof=1$): $\sigma_{\text{cell}} = \mathbf{0.0099}$
+   - *Interpretation:* Measures physical generalizability across distinct battery cells.
+
+2. **Total Pooled Run Variance ($\sigma_{\text{pooled}} = 0.0138$):**
+   - Total individual experimental runs: $4\text{ folds} \times 3\text{ seeds} = 12\text{ runs}$.
+   - Sample standard deviation across all 12 entries ($N=12$, $ddof=1$): $\sigma_{\text{pooled}} = \mathbf{0.0138}$
+   - *Interpretation:* Captures total experimental variance (cell-to-cell differences combined with stochastic training initialization).
+
+3. **Within-Cell Seed Variance ($\bar{\sigma}_{\text{seed}} = 0.0088$):**
+   - Average standard deviation across seeds for the same cell is $0.0088$ (and $0.0039$ across the 3 failure cells). Stochastic seed variation is secondary to cross-cell physical divergence.
+
+**Canonical Standard Adopted in Report:** All primary tables report the pooled run standard deviation **$0.0573 \pm 0.0138$ (pooled over 12 runs: 4 folds × 3 seeds)**, matching the exact CSV files on disk. Single numbers are always explicitly labeled with their aggregation scope.
+
 ---
 
 ## 8. Final Publication-Safe Contribution Statement
 
 > **Abstract Contribution Summary:**  
-> "This work investigates the integration of physical inductive constraints into data-driven battery state estimation and remaining useful life prognostics. We present the Split-Latent Aging Core (SLAC), an architecture that structurally guarantees monotonicity of irreversible battery degradation by parameterizing cumulative damage as a strictly positive increment ($\Delta D_t = \lambda \cdot \text{Softplus}(f_\theta(s_t)) > 0$), while independently modeling reversible electrochemical relaxation through a hard-gated recovery branch ($R_t$). Under Leave-One-Battery-Out cross-validation on the NASA PCoE benchmark, eliminating the architectural monotonicity constraint causes a 203.5% increase in SoH estimation error ($0.0573 \to 0.1739$ RMSE) and results in non-monotonic trajectories across all test folds. Extrapolating remaining useful life from the constrained latent damage trajectory outperforms tree-based models on the accelerating-knee cell (4.94 vs. 9.20 MAE on B0005), though simpler linear models perform better on non-accelerating cells. The macro degradation state is represented in a 32-byte persistent streaming structure requiring zero dynamic memory allocation, suitable for embedded microcontroller tracking. Due to the small sample size ($N=4$ cells), formal statistical significance cannot be claimed ($p \ge 0.125$), and validation on broader chemistries remains essential future work."
+> "This work investigates the integration of physical inductive constraints into data-driven battery state estimation and remaining useful life prognostics. We present the Split-Latent Aging Core (SLAC), an architecture that structurally guarantees monotonicity of irreversible battery degradation by parameterizing cumulative damage as a strictly positive increment ($\Delta D_t = \lambda \cdot \text{Softplus}(f_\theta(s_t)) > 0$), while independently modeling reversible electrochemical relaxation through a hard-gated recovery branch ($R_t$). Under Leave-One-Battery-Out cross-validation on the NASA PCoE benchmark, eliminating the architectural monotonicity constraint causes a 203.5% increase in SoH estimation error ($0.0573 \to 0.1739$ RMSE) and results in non-monotonic trajectories across all test folds. Extrapolating remaining useful life from the constrained latent damage trajectory achieves ~46% lower MAE than tree-based models on the accelerating-knee cell (4.94 vs. 9.20 for Random Forest and 9.21 for XGBoost on B0005), though simpler linear models perform better on non-accelerating cells. The macro degradation state is represented in a 32-byte persistent streaming structure requiring zero dynamic memory allocation, suitable for embedded microcontroller tracking. Due to the small sample size ($N=4$ cells), formal statistical significance cannot be claimed ($p \ge 0.125$), and validation on broader chemistries remains essential future work."
