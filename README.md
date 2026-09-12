@@ -42,19 +42,22 @@ MonARCH therefore separates them:
 
 The cumulative damage state is updated as:
 
-$$\Delta D_t = \lambda\,\mathrm{Softplus}(f_\theta(s_t))$$
+```text
+ΔD_t = λ * Softplus(f_θ(s_t))
+D_t  = D_(t-1) + ΔD_t
+```
 
-$$D_t = D_{t-1} + \Delta D_t$$
-
-Because the increment is non-negative by construction, the damage trajectory cannot spontaneously decrease.
+Because the Softplus increment is strictly non-negative (`ΔD_t >= 0`) by construction, the cumulative damage trajectory cannot spontaneously decrease, ensuring physical degradation monotonicity across battery life.
 
 ### 2. Hard-gated recovery
 
-Battery relaxation after rest can produce apparent recovery. MonARCH models this separately:
+Battery relaxation after qualifying rest periods can produce apparent capacity recovery. MonARCH models this separately using a physical gating mechanism:
 
-$$R_t = \mathrm{rest\_flag}_t \cdot R_{head}(\text{rest features},h_t)$$
+```text
+R_t = rest_flag_t * R_head(rest_features, h_t)
+```
 
-If there was no qualifying rest event, the recovery branch is structurally forced to zero.
+If there was no qualifying rest event (`rest_flag_t == 0`), the recovery branch is structurally forced to zero, preventing the network from hallucinating unphysical capacity jumps during active cycling.
 
 ### 3. Two-timescale estimation
 
