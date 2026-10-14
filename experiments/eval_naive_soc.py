@@ -9,7 +9,13 @@ Evaluated across all 4 NASA cells (B0005, B0006, B0007, B0018) on the exact same
 intra-cycle discharge profiles as the GRU module.
 """
 
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import numpy as np
 import pandas as pd
 from src.models.intracycle_soc import extract_intracycle_profiles
@@ -62,27 +68,19 @@ print(f"Overall Naive Coulomb-Counting RMSE : {overall_rmse:.4f} ({overall_rmse*
 print(f"Overall Naive Coulomb-Counting MAE  : {overall_mae:.4f} ({overall_mae*100:.2f}%)", flush=True)
 print("=" * 85, flush=True)
 
-# Comparison with GRU
-print("\n" + "=" * 85, flush=True)
-print("DIRECT COMPARISON: NAIVE COULOMB COUNTING vs. INTRA-CYCLE GRU", flush=True)
-print("=" * 85, flush=True)
-df_gru = pd.read_csv("artifacts/intracycle_soc_results.csv")
-gru_summary = df_gru.groupby("fold")[["rmse", "mae"]].mean()
+# Comparison with GRU and SOH-Conditioned CC across aging tiers
+print("\n" + "=" * 90, flush=True)
+print("AGING-STRATIFIED COMPARISON: NAIVE DRIFT vs SOH-CONDITIONED / GRU ESTIMATION", flush=True)
+print("=" * 90, flush=True)
+results_csv = Path("artifacts/intracycle_soc_results.csv")
+if results_csv.exists():
+    df_soc = pd.read_csv(results_csv)
+    tier_summary = df_soc.groupby(["dataset", "aging_tier", "method"])[["rmse", "mae"]].mean().reset_index()
+    print(f"{'Dataset':<10} | {'Aging Tier':<20} | {'Method':<25} | {'RMSE':<10} | {'MAE':<10}", flush=True)
+    print("-" * 90, flush=True)
+    for _, row in tier_summary.iterrows():
+        print(f"{row['dataset']:<10} | {row['aging_tier']:<20} | {row['method']:<25} | {row['rmse']:<10.4f} | {row['mae']:<10.4f}", flush=True)
+    print("=" * 90, flush=True)
+else:
+    print("Run `python experiments/run_intracycle_soc.py` first to generate artifacts/intracycle_soc_results.csv")
 
-print(f"{'Cell':<8} | {'Naive RMSE':<12} | {'GRU RMSE':<12} | {'Naive MAE':<12} | {'GRU MAE':<12} | {'Error Reduction':<15}", flush=True)
-print("-" * 85, flush=True)
-for cm in cell_metrics:
-    c = cm["cell"]
-    n_rmse = cm["rmse"]
-    g_rmse = gru_summary.loc[c, "rmse"]
-    n_mae = cm["mae"]
-    g_mae = gru_summary.loc[c, "mae"]
-    reduc = (1.0 - g_rmse / n_rmse) * 100
-    print(f"{c:<8} | {n_rmse:<12.4f} | {g_rmse:<12.4f} | {n_mae:<12.4f} | {g_mae:<12.4f} | -{reduc:<14.1f}%", flush=True)
-
-print("=" * 85, flush=True)
-overall_gru_rmse = float(df_gru["rmse"].mean())
-overall_gru_mae = float(df_gru["mae"].mean())
-overall_reduc = (1.0 - overall_gru_rmse / overall_rmse) * 100
-print(f"OVERALL  | {overall_rmse:<12.4f} | {overall_gru_rmse:<12.4f} | {overall_mae:<12.4f} | {overall_gru_mae:<12.4f} | -{overall_reduc:<14.1f}%", flush=True)
-print("=" * 85, flush=True)

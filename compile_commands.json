@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "C:/Users/saksh/OneDrive/Documents/AWS ML",
+    "command": "gcc -std=c99 -Iembedded/esp32/main -c embedded/esp32/main/pi_mdcnet_inference.c",
+    "file": "embedded/esp32/main/pi_mdcnet_inference.c"
+  },
+  {
+    "directory": "C:/Users/saksh/OneDrive/Documents/AWS ML",
+    "command": "gcc -std=c99 -Iembedded/esp32/main -c embedded/esp32/main/main.c",
+    "file": "embedded/esp32/main/main.c"
+  }
+]

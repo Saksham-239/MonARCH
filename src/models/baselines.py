@@ -30,6 +30,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -705,8 +708,11 @@ class StatisticalDecompositionModel(BaselineModel):
     def predict(self, test_data: pd.DataFrame) -> PredictionResult:
         """Predict SoH using trend + regeneration decomposition."""
         n = len(test_data)
-        # Continue cycle indexing from training
-        cycle_idx = np.arange(self._n_train, self._n_train + n, dtype=np.float64)
+        # Cycle index relative to the cell's own aging trajectory
+        if "cycle_index" in test_data.columns:
+            cycle_idx = test_data["cycle_index"].values.astype(np.float64)
+        else:
+            cycle_idx = np.arange(n, dtype=np.float64)
 
         # Trend prediction
         soh_trend = np.polyval(self._trend_coeffs, cycle_idx)
@@ -726,7 +732,7 @@ class StatisticalDecompositionModel(BaselineModel):
         soc_pred = np.full(n, np.nan)
 
         # RUL: extrapolate trend to EOL threshold
-        eol_soh = 0.70  # 30% fade from rated
+        eol_soh = 0.80  # 20% fade from rated (80% SoH standard)
         rul_pred = np.full(n, np.nan)
         if self._trend_coeffs is not None:
             # Find where trend crosses EOL
@@ -747,6 +753,320 @@ class StatisticalDecompositionModel(BaselineModel):
 
 
 # =============================================================================
+# 7. MULTI-LAYER PERCEPTRON (MLP) BASELINE
+# =============================================================================
+
+class MLPBaselineModel(BaselineModel):
+    """Multi-Layer Perceptron (MLP) baseline on tabular cycle features."""
+    name = "MLP"
+
+    def __init__(self) -> None:
+        self.net: nn.Module | None = None
+        self._wall_clock: float = 0.0
+
+    def fit(self, train_data: pd.DataFrame, **hparams: Any) -> None:
+        t0 = time.monotonic()
+        X = _prepare_features(train_data)
+        y = train_data["soh"].values.astype(np.float32)
+
+        x_mean = np.mean(X, axis=0)
+        x_std = np.std(X, axis=0)
+        x_std[x_std < 1e-8] = 1.0
+        self._mean = x_mean
+        self._std = x_std
+
+        X_norm = (X - x_mean) / x_std
+
+        torch.manual_seed(42)
+        in_dim = X.shape[1]
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.GELU(),
+            nn.LayerNorm(64),
+            nn.Linear(64, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+
+        opt = torch.optim.AdamW(self.net.parameters(), lr=3e-3, weight_decay=1e-4)
+        x_t = torch.tensor(X_norm, dtype=torch.float32)
+        y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
+
+        self.net.train()
+        for _ in range(hparams.get("epochs", 40)):
+            opt.zero_grad()
+            out = self.net(x_t)
+            loss = F.mse_loss(out, y_t)
+            loss.backward()
+            opt.step()
+
+        self._wall_clock = time.monotonic() - t0
+
+    def predict(self, test_data: pd.DataFrame) -> PredictionResult:
+        n = len(test_data)
+        X = _prepare_features(test_data)
+        X_norm = (X - self._mean) / self._std
+
+        self.net.eval()
+        with torch.no_grad():
+            soh_pred = self.net(torch.tensor(X_norm, dtype=torch.float32)).squeeze(-1).numpy().astype(np.float64)
+
+        return PredictionResult(
+            soh=soh_pred,
+            soc=np.full(n, np.nan),
+            rul=np.full(n, np.nan),
+            wall_clock_seconds=self._wall_clock,
+        )
+
+
+# =============================================================================
+# 8. TEMPORAL CONVOLUTIONAL NETWORK (TCN) BASELINE
+# =============================================================================
+
+class _CausalConv1dBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size, dilation=dilation)
+        self.act = nn.GELU()
+        self.norm = nn.GroupNorm(1, out_ch)
+        self.res = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = self.res(x)
+        x_pad = F.pad(x, (self.pad, 0))  # causal left pad
+        out = self.conv(x_pad)
+        return self.act(self.norm(out + res))
+
+
+class TCNBaselineModel(BaselineModel):
+    """Causal Temporal Convolutional Network (TCN) on cycle sequences."""
+    name = "TCN"
+
+    def __init__(self) -> None:
+        self.net: nn.Module | None = None
+        self._wall_clock: float = 0.0
+
+    def fit(self, train_data: pd.DataFrame, **hparams: Any) -> None:
+        t0 = time.monotonic()
+        X = _prepare_features(train_data)
+        y = train_data["soh"].values.astype(np.float32)
+
+        x_mean = np.mean(X, axis=0)
+        x_std = np.std(X, axis=0)
+        x_std[x_std < 1e-8] = 1.0
+        self._mean = x_mean
+        self._std = x_std
+        X_norm = (X - x_mean) / x_std
+
+        torch.manual_seed(42)
+        in_dim = X.shape[1]
+
+        class TCNNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.b1 = _CausalConv1dBlock(in_dim, 32, kernel_size=3, dilation=1)
+                self.b2 = _CausalConv1dBlock(32, 32, kernel_size=3, dilation=2)
+                self.b3 = _CausalConv1dBlock(32, 32, kernel_size=3, dilation=4)
+                self.head = nn.Linear(32, 1)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                h = self.b3(self.b2(self.b1(x)))
+                return self.head(h.transpose(1, 2))
+
+        self.net = TCNNet()
+        opt = torch.optim.AdamW(self.net.parameters(), lr=3e-3, weight_decay=1e-4)
+
+        x_t = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(0).transpose(1, 2)
+        y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+
+        self.net.train()
+        for _ in range(hparams.get("epochs", 40)):
+            opt.zero_grad()
+            out = self.net(x_t)
+            loss = F.mse_loss(out, y_t)
+            loss.backward()
+            opt.step()
+
+        self._wall_clock = time.monotonic() - t0
+
+    def predict(self, test_data: pd.DataFrame) -> PredictionResult:
+        n = len(test_data)
+        X = _prepare_features(test_data)
+        X_norm = (X - self._mean) / self._std
+
+        self.net.eval()
+        with torch.no_grad():
+            x_t = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(0).transpose(1, 2)
+            out = self.net(x_t).squeeze(0).squeeze(-1)
+            soh_pred = out.numpy().astype(np.float64)
+
+        return PredictionResult(
+            soh=soh_pred,
+            soc=np.full(n, np.nan),
+            rul=np.full(n, np.nan),
+            wall_clock_seconds=self._wall_clock,
+        )
+
+
+# =============================================================================
+# 9. TRANSFORMER SEQUENCE BASELINE
+# =============================================================================
+
+class TransformerBaselineModel(BaselineModel):
+    """Vanilla Transformer Sequence Encoder baseline with causal self-attention."""
+    name = "Transformer"
+
+    def __init__(self) -> None:
+        self.net: nn.Module | None = None
+        self._wall_clock: float = 0.0
+
+    def fit(self, train_data: pd.DataFrame, **hparams: Any) -> None:
+        t0 = time.monotonic()
+        X = _prepare_features(train_data)
+        y = train_data["soh"].values.astype(np.float32)
+
+        x_mean = np.mean(X, axis=0)
+        x_std = np.std(X, axis=0)
+        x_std[x_std < 1e-8] = 1.0
+        self._mean = x_mean
+        self._std = x_std
+        X_norm = (X - x_mean) / x_std
+
+        torch.manual_seed(42)
+        in_dim = X.shape[1]
+
+        class TransformerNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = nn.Linear(in_dim, 32)
+                encoder_layer = nn.TransformerEncoderLayer(
+                    d_model=32, nhead=4, dim_feedforward=64, dropout=0.1, batch_first=True
+                )
+                self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+                self.head = nn.Linear(32, 1)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                h = self.proj(x)
+                T = x.shape[1]
+                mask = nn.Transformer.generate_square_subsequent_mask(T).to(x.device)
+                h = self.transformer(h, mask=mask, is_causal=True)
+                return self.head(h)
+
+        self.net = TransformerNet()
+        opt = torch.optim.AdamW(self.net.parameters(), lr=3e-3, weight_decay=1e-4)
+
+        x_t = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(0)
+        y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+
+        self.net.train()
+        for _ in range(hparams.get("epochs", 40)):
+            opt.zero_grad()
+            out = self.net(x_t)
+            loss = F.mse_loss(out, y_t)
+            loss.backward()
+            opt.step()
+
+        self._wall_clock = time.monotonic() - t0
+
+    def predict(self, test_data: pd.DataFrame) -> PredictionResult:
+        n = len(test_data)
+        X = _prepare_features(test_data)
+        X_norm = (X - self._mean) / self._std
+
+        self.net.eval()
+        with torch.no_grad():
+            x_t = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(0)
+            out = self.net(x_t).squeeze(0).squeeze(-1)
+            soh_pred = out.numpy().astype(np.float64)
+
+        return PredictionResult(
+            soh=soh_pred,
+            soc=np.full(n, np.nan),
+            rul=np.full(n, np.nan),
+            wall_clock_seconds=self._wall_clock,
+        )
+
+
+# =============================================================================
+# 10. PHYSICS-INFORMED NEURAL NETWORK (PINN) BASELINE (NAIVE MONOTONICITY)
+# =============================================================================
+
+class PINNBaselineModel(BaselineModel):
+    """Classical PINN baseline with soft global monotonicity penalty on total SoH.
+
+    This baseline implements the standard approach in prior literature:
+    L = MSE(SOH_pred, SOH_true) + lambda_mono * ReLU(Delta SOH_pred)
+    which penalizes positive d(SOH)/dt globally, demonstrating how naive PINNs
+    fight genuine rest-induced electrochemical capacity regeneration.
+    """
+    name = "PINN"
+
+    def __init__(self, lambda_mono: float = 1.0) -> None:
+        self.net: nn.Module | None = None
+        self.lambda_mono = lambda_mono
+        self._wall_clock: float = 0.0
+
+    def fit(self, train_data: pd.DataFrame, **hparams: Any) -> None:
+        t0 = time.monotonic()
+        X = _prepare_features(train_data)
+        y = train_data["soh"].values.astype(np.float32)
+
+        x_mean = np.mean(X, axis=0)
+        x_std = np.std(X, axis=0)
+        x_std[x_std < 1e-8] = 1.0
+        self._mean = x_mean
+        self._std = x_std
+        X_norm = (X - x_mean) / x_std
+
+        torch.manual_seed(42)
+        in_dim = X.shape[1]
+
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 32),
+            nn.Tanh(),
+            nn.Linear(32, 1),
+        )
+
+        opt = torch.optim.AdamW(self.net.parameters(), lr=3e-3, weight_decay=1e-4)
+        x_t = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(0)
+        y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+
+        self.net.train()
+        for _ in range(hparams.get("epochs", 40)):
+            opt.zero_grad()
+            out = self.net(x_t)
+            mse_loss = F.mse_loss(out, y_t)
+            diffs = out[:, 1:, :] - out[:, :-1, :]
+            mono_loss = F.relu(diffs).mean()
+            loss = mse_loss + self.lambda_mono * mono_loss
+            loss.backward()
+            opt.step()
+
+        self._wall_clock = time.monotonic() - t0
+
+    def predict(self, test_data: pd.DataFrame) -> PredictionResult:
+        n = len(test_data)
+        X = _prepare_features(test_data)
+        X_norm = (X - self._mean) / self._std
+
+        self.net.eval()
+        with torch.no_grad():
+            x_t = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(0)
+            out = self.net(x_t).squeeze(0).squeeze(-1)
+            soh_pred = out.numpy().astype(np.float64)
+
+        return PredictionResult(
+            soh=soh_pred,
+            soc=np.full(n, np.nan),
+            rul=np.full(n, np.nan),
+            wall_clock_seconds=self._wall_clock,
+        )
+
+
+# =============================================================================
 # REGISTRY
 # =============================================================================
 
@@ -756,6 +1076,10 @@ BASELINE_REGISTRY: dict[str, type[BaselineModel]] = {
     "RandomForest": RandomForestModel,
     "XGBoost": XGBoostModel,
     "VanillaLSTM": VanillaLSTMModel,
+    "MLP": MLPBaselineModel,
+    "TCN": TCNBaselineModel,
+    "Transformer": TransformerBaselineModel,
+    "PINN": PINNBaselineModel,
     "StatDecomp": StatisticalDecompositionModel,
 }
 """Registry of all baseline models. PI-MDCNet is in pi_mdcnet.py."""

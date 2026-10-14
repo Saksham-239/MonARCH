@@ -36,3 +36,8 @@ desktop.ini
 
 # Temporary agent scratch files
 scratch/
+
+# Internal agent tracking & raw data
+.internal_docs/
+data/raw/*.mat
+*.zip

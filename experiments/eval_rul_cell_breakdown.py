@@ -3,11 +3,18 @@ Per-Cell Win/Loss and Breakdown Analysis for RUL Methods
 ========================================================
 """
 
+import sys
+from pathlib import Path
 import pandas as pd
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 df_rul = pd.read_csv("artifacts/rul_validation_results.csv")
-df_comp = pd.read_csv("artifacts/comparison_table.csv")
+bench_file = Path("artifacts/benchmark_results.csv")
+df_comp = pd.read_csv(bench_file) if bench_file.exists() else pd.read_csv("artifacts/comparison_table.csv")
 
 methods_order = [
     "Raw_SoH_Extrap",

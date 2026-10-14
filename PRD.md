@@ -75,5 +75,87 @@ Building a fully serverless, zero-idle-cost cloud analytics pipeline on AWS Free
 
 ## 5. Success Metrics
 1. **Academic Defensibility:** All claims backed by LOBO-CV benchmark tables (mean $\pm$ std) and complete component ablations. With $N=4$ cells ($N=3$ valid EOL cells for RUL), formal statistical significance ($p < 0.05$) cannot be established (minimum two-sided Wilcoxon $p = 0.125$ for $N=4$ and $p = 0.250$ for $N=3$); all inferential statistics are reported as exploratory/descriptive only.
-2. **Financial Efficiency:** Full semester demonstration executed within AWS Free Tier and student credits ($0 net out-of-pocket).
+2. **Financial Efficiency:** Full semesteYou are acting as a Principal ML Systems Engineer and Lead Peer Reviewer for IEEE Transactions on Industrial Informatics / Applied Energy. Your objective is to audit, refactor, and upgrade this repository (`MonARCH` / `PI-MDCNet v4`) into a rock-solid, zero-leakage, publication-grade codebase ready for large-scale AWS benchmarking and paper submission.
+
+Execute the following 6 phases across the exact files in this repository. Do not use mock results, hardcoded metrics, or placeholder C stubs.
+
+### Phase 1: Centralize Experimental Protocol & Eliminate Leakage (`experiments/protocol.py` & `src/data_loader.py`)
+1. **`experiments/protocol.py`**: Currently this file is nearly empty. Build a strict, centralized `ExperimentProtocol` dataclass and configuration registry inside `experiments/protocol.py` that defines:
+   - Deterministic seed list: `SEEDS = [42, 100, 2024, 2025, 2026]`
+   - End-of-Life (EOL) thresholds (e.g., 70% / 80% nominal capacity)
+   - Window sizes, prediction horizons, and Leave-One-Cell-Out (LOCO) cross-validation folds
+   - Standard evaluation metrics (`RMSE`, `MAE`, `MAPE`, `R2`, `RUL_AE`, `Alpha_Lambda_Accuracy`)
+   Import and enforce `experiments/protocol.py` across `experiments/train.py`, `experiments/evaluate.py`, `experiments/ablation.py`, `experiments/rul_validation.py`, and `experiments/eval_rul_cell_breakdown.py`.
+2. **Causal SLAC Decomposition (`src/data_loader.py`)**: Audit the SLAC decomposition in `src/data_loader.py`. Ensure that decomposing capacity into irreversible trend + local regeneration components at cycle `t` NEVER accesses capacity measurements from `t+1 ... N` (no two-sided savgol/wavelet/smoothing filters across the full trajectory prior to splitting). Implement a strictly causal expanding/rolling SLAC operator and add a unit test in `tests/test_data_loader.py` proving `SLAC(capacity[:t])[-1] == SLAC(capacity[:t+k])[t-1]` for all `k > 0`.
+
+### Phase 2: Multi-Dataset Expansion (`scripts/download_data.py` & `src/data_loader.py`)
+Expand beyond NASA `B0005.mat` so the paper demonstrates cross-cell and cross-chemistry generalization:
+1. **`scripts/download_data.py`**: Upgrade to automatically download, checksum-verify, and cache:
+   - **NASA PCoE**: Full 24°C quad (`B0005`, `B0006`, `B0007`, `B0018`).
+   - **CALCE (University of Maryland)**: `CS2_35`, `CS2_36`, `CS2_37`, `CS2_38` (prismatic LCO cells, 800+ cycles with strong rest-period capacity regeneration).
+   - **Oxford Battery Degradation Dataset** (Kokam pouch cells `Cell1`–`Cell8` under dynamic urban Artemis discharge profiles) for dynamic intracycle SOC + SOH validation.
+2. **`src/data_loader.py`**: Refactor into modular dataset adapters (`NASAAdapter`, `CALCEAdapter`, `OxfordAdapter`) outputting a unified tensor schema `(cycle_features, slac_trend, slac_regen, soh_target, rul_target, intracycle_voltage_current_temp)`.
+
+### Phase 3: Physics-Informed Loss & Coupled Intracycle SOC (`src/models/pi_mdcnet.py` & `src/models/intracycle_soc.py`)
+1. **`src/models/pi_mdcnet.py`**: Audit the Physics-Informed loss terms. Ensure the monotonic degradation constraint (`d(SOH)/dt <= 0`) is applied **exclusively to the SLAC irreversible trend head**, while the regeneration head is governed by rest-time/relaxation physics so the physics loss does not suppress legitimate capacity regeneration spikes.
+2. **`src/models/intracycle_soc.py`, `experiments/run_intracycle_soc.py`, & `experiments/eval_naive_soc.py`**: Couple intracycle SOC estimation directly to `PI-MDCNet`'s predicted SOH (`Q_aged = SOH_pred * Q_nominal`). Show quantitatively in `artifacts/intracycle_soc_results.csv` how naive Coulomb counting / OCV lookup (`eval_naive_soc.py` assuming static `Q_nominal`) drifts severely as the battery ages (95%, 85%, 75% SOH), whereas SOH-conditioned `intracycle_soc.py` maintains <1.5% SOC RMSE across aged cycles on both NASA and Oxford dynamic profiles.
+
+### Phase 4: Fix Duplicate CSV Artifacts & Multi-Seed Statistical Rigor (`experiments/evaluate.py` & `experiments/ablation.py`)
+Currently `artifacts/ablation_results.csv` is byte-identical to `artifacts/ablation_table.csv`, and `artifacts/benchmark_results.csv` is byte-identical to `artifacts/comparison_table.csv`.
+1. Refactor `experiments/evaluate.py`, `experiments/ablation.py`, `experiments/rul_validation.py`, and `experiments/eval_rul_cell_breakdown.py` to execute across all 5 seeds in `experiments/protocol.py` and across all cells in Leave-One-Cell-Out validation.
+2. Save granular per-seed, per-cell rows to `artifacts/*_results.csv`.
+3. Aggregate `Mean ± Std` across seeds, compute paired Wilcoxon signed-rank / Student's t-test p-values against `src/models/baselines.py` (MLP, LSTM/BiLSTM, TCN, Transformer, Vanilla PINN), and output formatted summary tables to `artifacts/comparison_table.csv`, `artifacts/ablation_table.csv`, and `artifacts/paper_tables.tex`.
+
+### Phase 5: Real ESP32 C Inference & Quantization (`embedded/export_onnx.py` & `embedded/esp32/main/`)
+Make the embedded BMS contribution genuinely publication-grade:
+1. **`embedded/export_onnx.py`**: Export both FP32 (`pi_mdcnet_edge.onnx`) and INT8 quantized (`pi_mdcnet_edge_int8.onnx`) models, AND auto-generate a C header file `embedded/esp32/main/pi_mdcnet_weights.h` containing the exported quantized/FP32 weight tensors and dilation config.
+2. **`embedded/esp32/main/pi_mdcnet_inference.h` & `pi_mdcnet_inference.c`**: Implement the complete, dependency-free C99 forward pass of `PI-MDCNet v4` (causal dilated 1D convolutions, activations, SLAC trend/regeneration fusion head, and static arena buffer allocation with zero `malloc`).
+3. **`embedded/esp32/main/main.c`**: Implement a deterministic cycle-count (`esp_cpu_get_cycle_count()`) latency & SRAM profiler that runs a test vector and prints exact MACs, Flash size (KB), static SRAM footprint (Bytes), and latency (us).
+4. Add a Python C-binding / subprocess parity test in `tests/test_pi_mdcnet.py` verifying that `pi_mdcnet_inference.c` matches PyTorch/`onnxruntime` outputs within `< 1e-4` (FP32) / `< 1e-2` (INT8).
+
+### Phase 6: Repo Hygiene, Comprehensive Pytest Suite & Publication Figures
+1. Delete `artifacts_archive/` and move internal agent tracking files (`Memory.md`, `Phases.md`, `Rules.md`, `PRD.md`, `artifacts/forensic_verification_report.md`) to `.internal_docs/` (added to `.gitignore`). Update `.gitignore` to exclude `data/raw/*.mat`.
+2. Expand `tests/test_data_loader.py`, `tests/test_evaluate.py`, `tests/test_baselines.py`, and `tests/test_pi_mdcnet.py` to achieve >90% coverage of core invariants (zero causal leakage, disjoint cell splits, gradient flow, ONNX/C numerical parity).
+3. Update figure generation to save high-resolution vector `.pdf` and 300-DPI `.png` figures with `±1 std` shaded bands across seeds.You are acting as a Principal ML Systems Engineer and Lead Peer Reviewer for IEEE Transactions on Industrial Informatics / Applied Energy. Your objective is to audit, refactor, and upgrade this repository (`MonARCH` / `PI-MDCNet v4`) into a rock-solid, zero-leakage, publication-grade codebase ready for large-scale AWS benchmarking and paper submission.
+
+Execute the following 6 phases across the exact files in this repository. Do not use mock results, hardcoded metrics, or placeholder C stubs.
+
+### Phase 1: Centralize Experimental Protocol & Eliminate Leakage (`experiments/protocol.py` & `src/data_loader.py`)
+1. **`experiments/protocol.py`**: Currently this file is nearly empty. Build a strict, centralized `ExperimentProtocol` dataclass and configuration registry inside `experiments/protocol.py` that defines:
+   - Deterministic seed list: `SEEDS = [42, 100, 2024, 2025, 2026]`
+   - End-of-Life (EOL) thresholds (e.g., 70% / 80% nominal capacity)
+   - Window sizes, prediction horizons, and Leave-One-Cell-Out (LOCO) cross-validation folds
+   - Standard evaluation metrics (`RMSE`, `MAE`, `MAPE`, `R2`, `RUL_AE`, `Alpha_Lambda_Accuracy`)
+   Import and enforce `experiments/protocol.py` across `experiments/train.py`, `experiments/evaluate.py`, `experiments/ablation.py`, `experiments/rul_validation.py`, and `experiments/eval_rul_cell_breakdown.py`.
+2. **Causal SLAC Decomposition (`src/data_loader.py`)**: Audit the SLAC decomposition in `src/data_loader.py`. Ensure that decomposing capacity into irreversible trend + local regeneration components at cycle `t` NEVER accesses capacity measurements from `t+1 ... N` (no two-sided savgol/wavelet/smoothing filters across the full trajectory prior to splitting). Implement a strictly causal expanding/rolling SLAC operator and add a unit test in `tests/test_data_loader.py` proving `SLAC(capacity[:t])[-1] == SLAC(capacity[:t+k])[t-1]` for all `k > 0`.
+
+### Phase 2: Multi-Dataset Expansion (`scripts/download_data.py` & `src/data_loader.py`)
+Expand beyond NASA `B0005.mat` so the paper demonstrates cross-cell and cross-chemistry generalization:
+1. **`scripts/download_data.py`**: Upgrade to automatically download, checksum-verify, and cache:
+   - **NASA PCoE**: Full 24°C quad (`B0005`, `B0006`, `B0007`, `B0018`).
+   - **CALCE (University of Maryland)**: `CS2_35`, `CS2_36`, `CS2_37`, `CS2_38` (prismatic LCO cells, 800+ cycles with strong rest-period capacity regeneration).
+   - **Oxford Battery Degradation Dataset** (Kokam pouch cells `Cell1`–`Cell8` under dynamic urban Artemis discharge profiles) for dynamic intracycle SOC + SOH validation.
+2. **`src/data_loader.py`**: Refactor into modular dataset adapters (`NASAAdapter`, `CALCEAdapter`, `OxfordAdapter`) outputting a unified tensor schema `(cycle_features, slac_trend, slac_regen, soh_target, rul_target, intracycle_voltage_current_temp)`.
+
+### Phase 3: Physics-Informed Loss & Coupled Intracycle SOC (`src/models/pi_mdcnet.py` & `src/models/intracycle_soc.py`)
+1. **`src/models/pi_mdcnet.py`**: Audit the Physics-Informed loss terms. Ensure the monotonic degradation constraint (`d(SOH)/dt <= 0`) is applied **exclusively to the SLAC irreversible trend head**, while the regeneration head is governed by rest-time/relaxation physics so the physics loss does not suppress legitimate capacity regeneration spikes.
+2. **`src/models/intracycle_soc.py`, `experiments/run_intracycle_soc.py`, & `experiments/eval_naive_soc.py`**: Couple intracycle SOC estimation directly to `PI-MDCNet`'s predicted SOH (`Q_aged = SOH_pred * Q_nominal`). Show quantitatively in `artifacts/intracycle_soc_results.csv` how naive Coulomb counting / OCV lookup (`eval_naive_soc.py` assuming static `Q_nominal`) drifts severely as the battery ages (95%, 85%, 75% SOH), whereas SOH-conditioned `intracycle_soc.py` maintains <1.5% SOC RMSE across aged cycles on both NASA and Oxford dynamic profiles.
+
+### Phase 4: Fix Duplicate CSV Artifacts & Multi-Seed Statistical Rigor (`experiments/evaluate.py` & `experiments/ablation.py`)
+Currently `artifacts/ablation_results.csv` is byte-identical to `artifacts/ablation_table.csv`, and `artifacts/benchmark_results.csv` is byte-identical to `artifacts/comparison_table.csv`.
+1. Refactor `experiments/evaluate.py`, `experiments/ablation.py`, `experiments/rul_validation.py`, and `experiments/eval_rul_cell_breakdown.py` to execute across all 5 seeds in `experiments/protocol.py` and across all cells in Leave-One-Cell-Out validation.
+2. Save granular per-seed, per-cell rows to `artifacts/*_results.csv`.
+3. Aggregate `Mean ± Std` across seeds, compute paired Wilcoxon signed-rank / Student's t-test p-values against `src/models/baselines.py` (MLP, LSTM/BiLSTM, TCN, Transformer, Vanilla PINN), and output formatted summary tables to `artifacts/comparison_table.csv`, `artifacts/ablation_table.csv`, and `artifacts/paper_tables.tex`.
+
+### Phase 5: Real ESP32 C Inference & Quantization (`embedded/export_onnx.py` & `embedded/esp32/main/`)
+Make the embedded BMS contribution genuinely publication-grade:
+1. **`embedded/export_onnx.py`**: Export both FP32 (`pi_mdcnet_edge.onnx`) and INT8 quantized (`pi_mdcnet_edge_int8.onnx`) models, AND auto-generate a C header file `embedded/esp32/main/pi_mdcnet_weights.h` containing the exported quantized/FP32 weight tensors and dilation config.
+2. **`embedded/esp32/main/pi_mdcnet_inference.h` & `pi_mdcnet_inference.c`**: Implement the complete, dependency-free C99 forward pass of `PI-MDCNet v4` (causal dilated 1D convolutions, activations, SLAC trend/regeneration fusion head, and static arena buffer allocation with zero `malloc`).
+3. **`embedded/esp32/main/main.c`**: Implement a deterministic cycle-count (`esp_cpu_get_cycle_count()`) latency & SRAM profiler that runs a test vector and prints exact MACs, Flash size (KB), static SRAM footprint (Bytes), and latency (us).
+4. Add a Python C-binding / subprocess parity test in `tests/test_pi_mdcnet.py` verifying that `pi_mdcnet_inference.c` matches PyTorch/`onnxruntime` outputs within `< 1e-4` (FP32) / `< 1e-2` (INT8).
+
+### Phase 6: Repo Hygiene, Comprehensive Pytest Suite & Publication Figures
+1. Delete `artifacts_archive/` and move internal agent tracking files (`Memory.md`, `Phases.md`, `Rules.md`, `PRD.md`, `artifacts/forensic_verification_report.md`) to `.internal_docs/` (added to `.gitignore`). Update `.gitignore` to exclude `data/raw/*.mat`.
+2. Expand `tests/test_data_loader.py`, `tests/test_evaluate.py`, `tests/test_baselines.py`, and `tests/test_pi_mdcnet.py` to achieve >90% coverage of core invariants (zero causal leakage, disjoint cell splits, gradient flow, ONNX/C numerical parity).
+3. Update figure generation to save high-resolution vector `.pdf` and 300-DPI `.png` figures with `±1 std` shaded bands across seeds.r demonstration executed within AWS Free Tier and student credits ($0 net out-of-pocket).
 3. **End-to-End Functionality:** Demonstrable closed loop: Simulated cell publishes MQTT telemetry $\rightarrow$ Cloud processes features and inference $\rightarrow$ Live dashboard updates with real-time health estimates.

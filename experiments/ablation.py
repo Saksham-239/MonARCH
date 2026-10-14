@@ -25,15 +25,21 @@ from __future__ import annotations
 import json
 import logging
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy import stats
 
 from src.data_loader import load_all_cells
 from src.models.pi_mdcnet import (
@@ -75,6 +81,7 @@ class AblationNoCrossAttn(PIMDCNet):
     def __init__(self, cfg: SLACConfig = SLACConfig()) -> None:
         super().__init__(cfg)
         self.concat_proj = nn.Linear(cfg.elec_embed_dim + cfg.therm_embed_dim, cfg.attn_dim)
+        self.regen_concat = nn.Linear(cfg.attn_dim + cfg.attn_dim, cfg.attn_dim)
 
     def forward(
         self,
@@ -84,6 +91,8 @@ class AblationNoCrossAttn(PIMDCNet):
         rest_features: torch.Tensor,
         rest_flag: torch.Tensor,
         cycle_idx: torch.Tensor,
+        soh_lag: torch.Tensor | None = None,
+        initial_soh: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         B, T, _ = x_elec.shape
         e_seq = self.elec_encoder(x_elec)
@@ -100,10 +109,19 @@ class AblationNoCrossAttn(PIMDCNet):
 
         rest_flat = rest_features.reshape(B * T, self.cfg.rest_input_dim)
         rest_fl_flat = rest_flag.reshape(B * T, 1)
-        R_flat = self.regen_branch(rest_flat, h_flat, rest_fl_flat)
+        # Ablated non-attentive regeneration: projection of concatenated rest embedding + h_flat
+        rest_emb = self.regen_branch.rest_embed(rest_flat)
+        regen_feat = F.relu(self.regen_concat(torch.cat([rest_emb, h_flat], dim=-1)))
+        R_flat = rest_fl_flat * self.regen_branch.r_max * self.regen_branch.mlp_regen(regen_feat)
         R_seq = R_flat.reshape(B, T, 1)
 
-        soh_seq = self.soh_0 - D_seq + R_seq
+        if soh_lag is not None:
+            soh_seq = soh_lag - inc_seq + R_seq
+        elif initial_soh is not None:
+            soh_seq = initial_soh - D_seq + R_seq
+        else:
+            soh_seq = self.soh_0 - D_seq + R_seq
+
         soc_seq = self.soc_head(h_flat).reshape(B, T, 1)
 
         k = self.cfg.rul_window_k
@@ -129,6 +147,8 @@ class AblationNoHardGating(PIMDCNet):
         rest_features: torch.Tensor,
         rest_flag: torch.Tensor,
         cycle_idx: torch.Tensor,
+        soh_lag: torch.Tensor | None = None,
+        initial_soh: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         B, T, _ = x_elec.shape
         e_seq = self.elec_encoder(x_elec)
@@ -148,7 +168,13 @@ class AblationNoHardGating(PIMDCNet):
         R_flat = self.regen_branch(rest_flat, h_flat, always_on)
         R_seq = R_flat.reshape(B, T, 1)
 
-        soh_seq = self.soh_0 - D_seq + R_seq
+        if soh_lag is not None:
+            soh_seq = soh_lag - inc_seq + R_seq
+        elif initial_soh is not None:
+            soh_seq = initial_soh - D_seq + R_seq
+        else:
+            soh_seq = self.soh_0 - D_seq + R_seq
+
         soc_seq = self.soc_head(h_flat).reshape(B, T, 1)
 
         k = self.cfg.rul_window_k
@@ -182,6 +208,8 @@ class AblationNoMonotonicity(PIMDCNet):
         rest_features: torch.Tensor,
         rest_flag: torch.Tensor,
         cycle_idx: torch.Tensor,
+        soh_lag: torch.Tensor | None = None,
+        initial_soh: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         B, T, _ = x_elec.shape
         e_seq = self.elec_encoder(x_elec)
@@ -199,7 +227,8 @@ class AblationNoMonotonicity(PIMDCNet):
         R_flat = self.regen_branch(rest_flat, h_flat, rest_fl_flat)
         R_seq = R_flat.reshape(B, T, 1)
 
-        soh_seq = self.soh_0 - D_seq + R_seq
+        base_soh = initial_soh if initial_soh is not None else self.soh_0
+        soh_seq = base_soh - D_seq + R_seq
         soc_seq = self.soc_head(h_flat).reshape(B, T, 1)
 
         k = self.cfg.rul_window_k
@@ -303,11 +332,13 @@ def run_ablation_study(
                         rest_features=test_batch["rest_features"],
                         rest_flag=test_batch["rest_flag"],
                         cycle_idx=test_batch["cycle_idx"],
+                        soh_lag=test_batch.get("soh_lag", None),
                     )
                 D_t = test_out["D_t"][0, :, 0].cpu().numpy()
                 d_diff = np.diff(D_t)
                 is_monotonic = bool(np.all(d_diff >= -1e-6))
-                max_negative_violation = float(np.min(d_diff)) if len(d_diff) > 0 else 0.0
+                # Positive violation magnitude: max(0.0, -min(d_diff)) -> 0.000000 for monotonic
+                max_violation = float(max(0.0, -np.min(d_diff))) if len(d_diff) > 0 else 0.0
 
                 row = {
                     "variant": variant_name,
@@ -315,7 +346,7 @@ def run_ablation_study(
                     "seed": seed,
                     "wall_clock_s": wall_clock,
                     "is_damage_monotonic": is_monotonic,
-                    "max_monotonicity_violation": max_negative_violation,
+                    "max_monotonicity_violation": max_violation,
                     **soh_m,
                     **soc_m,
                     **rul_m,
@@ -324,29 +355,58 @@ def run_ablation_study(
                 logger.info(
                     "  [%s] Fold %s (seed %d): SoH RMSE=%.4f, Monotonic D_t=%s (viol=%.6f)",
                     variant_name, test_id, seed, soh_m.get("soh_rmse", np.nan),
-                    is_monotonic, max_negative_violation
+                    is_monotonic, max_violation
                 )
 
     ablation_df = pd.DataFrame(all_results)
     out_path = output_dir / "ablation_results.csv"
     tbl_path = output_dir / "ablation_table.csv"
     ablation_df.to_csv(out_path, index=False)
-    ablation_df.to_csv(tbl_path, index=False)
-    logger.info("Ablation results saved to %s and %s", out_path, tbl_path)
+    logger.info("Granular ablation results saved to %s", out_path)
+
+    # Compute statistical aggregation per variant
+    full_slac_scores = ablation_df[ablation_df["variant"] == "Full_SLAC"].groupby(["fold", "seed"])["soh_rmse"].mean()
+
+    stat_rows = []
+    for variant in ABLATION_VARIANTS.keys():
+        sub = ablation_df[ablation_df["variant"] == variant]
+        v_scores = sub.groupby(["fold", "seed"])["soh_rmse"].mean()
+
+        p_val = np.nan
+        if variant != "Full_SLAC":
+            # Paired t-test / Wilcoxon against Full_SLAC
+            common_idx = full_slac_scores.index.intersection(v_scores.index)
+            if len(common_idx) >= 3:
+                a_vals = full_slac_scores.loc[common_idx].values
+                b_vals = v_scores.loc[common_idx].values
+                if not np.allclose(a_vals, b_vals):
+                    try:
+                        _, p_val = stats.ttest_rel(b_vals, a_vals)
+                    except Exception:
+                        pass
+
+        stat_rows.append({
+            "variant": variant,
+            "soh_rmse_mean": float(sub["soh_rmse"].mean()),
+            "soh_rmse_std": float(sub["soh_rmse"].std()),
+            "soh_mae_mean": float(sub["soh_mae"].mean()),
+            "soh_mae_std": float(sub["soh_mae"].std()),
+            "rul_mae_mean": float(sub["rul_mae"].mean()) if "rul_mae" in sub.columns else np.nan,
+            "rul_mae_std": float(sub["rul_mae"].std()) if "rul_mae" in sub.columns else np.nan,
+            "monotonic_damage": bool(sub["is_damage_monotonic"].all()),
+            "p_value_vs_full": float(p_val) if not np.isnan(p_val) else 1.0,
+        })
+
+    summary_df = pd.DataFrame(stat_rows)
+    summary_df.to_csv(tbl_path, index=False)
+    logger.info("Aggregated ablation summary table saved to %s", tbl_path)
 
     # Print summary
-    print("\n" + "=" * 80)
-    print("ABLATION STUDY SUMMARY (Mean across seeds & folds)")
-    print("=" * 80)
-    summary = ablation_df.groupby("variant").agg(
-        soh_rmse_mean=("soh_rmse", "mean"),
-        soh_rmse_std=("soh_rmse", "std"),
-        soh_mae_mean=("soh_mae", "mean"),
-        soh_mae_std=("soh_mae", "std"),
-        monotonic=("is_damage_monotonic", "all"),
-    )
-    print(summary.to_string())
-    print("=" * 80 + "\n")
+    print("\n" + "=" * 95)
+    print("ABLATION STUDY SUMMARY (Aggregated across seeds & folds with p-values)")
+    print("=" * 95)
+    print(summary_df.to_string(index=False))
+    print("=" * 95 + "\n")
 
     return ablation_df
 

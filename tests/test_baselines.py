@@ -65,12 +65,13 @@ def dummy_data():
 
 
 def test_baseline_registry():
-    """Verify all 6 baselines are registered."""
+    """Verify all 10 baselines are registered."""
     baselines = get_all_baselines()
-    assert len(baselines) == 6
+    assert len(baselines) == 10
     expected = {
         "CoulombCounting", "EKF_1RC", "RandomForest",
-        "XGBoost", "VanillaLSTM", "StatDecomp"
+        "XGBoost", "VanillaLSTM", "StatDecomp",
+        "MLP", "TCN", "Transformer", "PINN"
     }
     assert set(b.name for b in baselines) == expected
     assert set(BASELINE_REGISTRY.keys()) == expected
@@ -119,7 +120,11 @@ def test_baseline_fit_predict(dummy_data):
             assert not np.all(np.isnan(pred.soh)), f"{name} must predict SoH"
             assert not np.all(np.isnan(pred.rul)), f"{name} must predict RUL"
             assert np.all(np.isnan(pred.soc)), f"{name} must report unimplemented SoC as NaN"
+        elif name in ("MLP", "TCN", "Transformer", "PINN"):
+            assert not np.all(np.isnan(pred.soh)), f"{name} must predict SoH"
+            assert np.all(np.isnan(pred.soc)), f"{name} must report unimplemented SoC as NaN"
 
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
+

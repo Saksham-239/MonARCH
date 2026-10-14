@@ -19,7 +19,13 @@ identical Leave-One-Battery-Out (LOBO) cross-validation across all NASA cells:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import numpy as np
 import pandas as pd
 import torch
@@ -27,9 +33,9 @@ import torch
 from src.data_loader import load_all_cells, CELL_IDS
 from src.models.pi_mdcnet import PIMDCNet, SLACConfig
 from experiments.train import FeatureScaler, CycleSequenceDataset, train_pimdcnet
-from experiments.protocol import BENCHMARK_SEEDS
+from experiments.protocol import BENCHMARK_SEEDS, EOL_FADE_FRACTION
 
-EOL_SOH_THRESHOLD = 0.70  # 1.4 Ah / 2.0 Ah
+EOL_SOH_THRESHOLD = 0.80  # 1.60 Ah / 2.0 Ah nominal (20% capacity fade standard)
 
 
 def extrapolate_linear_soh(soh_history: np.ndarray, target_soh: float = EOL_SOH_THRESHOLD) -> float:
@@ -88,10 +94,12 @@ def extrapolate_damage_latent(
     D_history: np.ndarray,
     soh_0: float = 1.0,
     target_soh: float = EOL_SOH_THRESHOLD,
-    window_k: int = 10,
+    window_k: int = 15,
+    alpha: float = 0.15,
 ) -> float:
-    """Non-learned linear extrapolation of monotonic damage latent D_t to D_fail.
+    """Non-learned causal linear extrapolation of monotonic damage latent D_t to D_fail.
 
+    Uses exponentially-weighted causal projection of recent damage increments:
     D_fail = soh_0 - target_soh
     Since D_t is strictly monotonic non-decreasing, dot{D}_t > 0.
     RUL = max(0, (D_fail - D_t) / dot{D}_t).
@@ -103,14 +111,16 @@ def extrapolate_damage_latent(
     if D_curr >= D_fail:
         return 0.0
 
-    # Estimate damage rate dot{D}_t from recent window (or cumulative if short)
-    k = min(n, window_k)
-    if k >= 5:
-        x = np.arange(k)
-        p = np.polyfit(x, D_history[-k:], deg=1)
-        dot_D = p[0]
-    else:
-        dot_D = (D_curr - D_history[0]) / max(n - 1, 1)
+    diffs = np.diff(D_history)
+    if len(diffs) == 0:
+        return max(0.0, float((D_fail - D_curr) / 0.002))
+
+    # Exponentially weighted causal rate over past window
+    k = min(len(diffs), window_k)
+    recent_diffs = diffs[-k:]
+    weights = (1.0 - alpha) ** np.arange(k)[::-1]
+    weights /= weights.sum()
+    dot_D = float(np.sum(recent_diffs * weights))
 
     if dot_D <= 1e-7:
         # Fallback to cumulative average damage rate
@@ -122,7 +132,7 @@ def extrapolate_damage_latent(
 
 def run_rul_benchmark(
     data_dir: Path,
-    seeds: list[int] = [42, 43, 44],
+    seeds: list[int] = BENCHMARK_SEEDS,
     burn_in: int = 10,
 ):
     print("=" * 90, flush=True)
@@ -135,12 +145,12 @@ def run_rul_benchmark(
     print("Dataset EOL ground truth verification:", flush=True)
     for c in CELL_IDS:
         df = cell_data[c]
-        reaches_eol = (df["capacity_ah"] <= 1.40).any()
+        reaches_eol = (df["capacity_ah"] <= 1.60).any()
         if reaches_eol:
-            eol_idx = df.loc[df["capacity_ah"] <= 1.40, "cycle_index"].index[0]
+            eol_idx = df.loc[df["capacity_ah"] <= 1.60, "cycle_index"].index[0]
             print(f"  Cell {c}: reaches EOL at cycle index {eol_idx} (capacity = {df['capacity_ah'].iloc[eol_idx]:.4f} Ah)", flush=True)
         else:
-            print(f"  Cell {c}: min capacity = {df['capacity_ah'].min():.4f} Ah > 1.40 Ah. RIGHT-CENSORED (RUL is NaN)", flush=True)
+            print(f"  Cell {c}: min capacity = {df['capacity_ah'].min():.4f} Ah > 1.60 Ah. RIGHT-CENSORED (RUL is NaN)", flush=True)
 
     # Methods:
     # 1. Raw_SoH_Extrap
@@ -247,7 +257,7 @@ def run_rul_benchmark(
         print(f"{row['method']:<20} | {row['fold']:<8} | {int(row['seed']):<5} | {rmse_str:<15} | {mae_str:<15}", flush=True)
 
     print("\n" + "=" * 90, flush=True)
-    print("SUMMARY BY METHOD (Across Valid LOBO Folds: B0005, B0006, B0018)", flush=True)
+    print("SUMMARY BY METHOD (Across All 4 LOBO Folds: B0005, B0006, B0007, B0018)", flush=True)
     print("=" * 90, flush=True)
     valid_df = df_res.dropna(subset=["mae"])
     summary = valid_df.groupby("method").agg(
@@ -276,7 +286,7 @@ def run_rul_benchmark(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
+    parser.add_argument("--seeds", type=int, nargs="+", default=BENCHMARK_SEEDS)
     parser.add_argument("--burn-in", type=int, default=10)
     args = parser.parse_args()
     run_rul_benchmark(args.data_dir, seeds=args.seeds, burn_in=args.burn_in)

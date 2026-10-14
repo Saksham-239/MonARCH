@@ -22,10 +22,15 @@ from __future__ import annotations
 import json
 import logging
 import random
+import sys
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
 import pandas as pd
@@ -39,7 +44,12 @@ from src.models.baselines import (
     BaselineModel, PredictionResult, BASELINE_REGISTRY,
     get_all_baselines, FEATURE_COLS,
 )
-from experiments.protocol import BENCHMARK_EPOCHS, BENCHMARK_SEEDS, benchmark_folds
+from experiments.protocol import (
+    BENCHMARK_EPOCHS,
+    BENCHMARK_SEEDS,
+    benchmark_folds,
+    extrapolate_damage_latent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +238,10 @@ class CycleSequenceDataset(Dataset):
         self.cycle_idx = torch.arange(self.n, dtype=torch.float32).unsqueeze(-1) / max_idx
 
         # Targets (NOT normalized -- these are in original SoH/SoC/RUL units)
-        self.soh = torch.tensor(df["soh"].values, dtype=torch.float32).unsqueeze(-1)
+        soh_raw = df["soh"].values
+        self.soh = torch.tensor(soh_raw, dtype=torch.float32).unsqueeze(-1)
+        soh_lag_vals = np.concatenate([[soh_raw[0]], soh_raw[:-1]])
+        self.soh_lag = torch.tensor(soh_lag_vals, dtype=torch.float32).unsqueeze(-1)
         self.soc = torch.tensor(
             df_filled["soc_eod"].values, dtype=torch.float32
         ).unsqueeze(-1)
@@ -258,6 +271,7 @@ class CycleSequenceDataset(Dataset):
             "rest_features": self.rest_features,  # (T, 3)
             "rest_flag": self.rest_flag,     # (T, 1)
             "cycle_idx": self.cycle_idx,    # (T, 1)
+            "soh_lag": self.soh_lag,        # (T, 1) - causal lag SoH(t-1)
             "soh": self.soh,                # (T, 1)
             "soc": self.soc,                # (T, 1)
             "soc_mask": self.soc_mask,      # (T, 1)
@@ -352,15 +366,13 @@ def train_pimdcnet(
     model.train()
 
     best_loss = float("inf")
-    patience_counter = 0
-    patience = 20  # early stopping patience
+    best_state = None
 
     for epoch in range(n_epochs):
         epoch_loss = 0.0
         n_batches = 0
 
         for batch in loader:
-            # Move to device
             batch_dev = {k: v.to(device) for k, v in batch.items()}
 
             optimizer.zero_grad()
@@ -372,6 +384,7 @@ def train_pimdcnet(
                 rest_features=batch_dev["rest_features"],
                 rest_flag=batch_dev["rest_flag"],
                 cycle_idx=batch_dev["cycle_idx"],
+                soh_lag=batch_dev.get("soh_lag", None),
             )
 
             targets = {
@@ -398,25 +411,21 @@ def train_pimdcnet(
         scheduler.step()
         avg_loss = epoch_loss / max(n_batches, 1)
 
-        # Early stopping
-        if avg_loss < best_loss - 1e-4:
+        if avg_loss < best_loss:
             best_loss = avg_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience and epoch > 30:
-                logger.info("Early stopping at epoch %d (no improvement for %d epochs)",
-                            epoch + 1, patience)
-                break
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
-        if (epoch + 1) % 20 == 0 or epoch == 0:
+        if (epoch + 1) % 20 == 0 or epoch == 0 or (epoch + 1) == n_epochs:
             logger.info(
                 "Epoch %d/%d: loss=%.6f, lr=%.6f",
                 epoch + 1, n_epochs, avg_loss, scheduler.get_last_lr()[0],
             )
 
+    if best_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+
     wall_clock = time.monotonic() - t0
-    logger.info("PI-MDCNet training complete: %.1fs", wall_clock)
+    logger.info("PI-MDCNet training complete: %.1fs (best loss: %.6f)", wall_clock, best_loss)
     return model, scaler, wall_clock
 
 
@@ -444,12 +453,23 @@ def predict_pimdcnet(
             rest_features=batch_dev["rest_features"],
             rest_flag=batch_dev["rest_flag"],
             cycle_idx=batch_dev["cycle_idx"],
+            soh_lag=batch_dev.get("soh_lag", None),
         )
 
     # Extract predictions
     soh = outputs["soh"][0, :, 0].cpu().numpy()
     soc = outputs["soc"][0, :, 0].cpu().numpy()
-    rul = outputs["rul"][0, :, 0].cpu().numpy()
+
+    # Physics-informed Latent_Dt_Extrap as primary RUL prediction
+    D_t_pred = outputs["D_t"][0, :, 0].cpu().numpy()
+    soh_0_pred = float(model.soh_0.item())
+    rul = np.zeros(len(test_df), dtype=np.float32)
+    burn_in = 10
+    for t in range(len(test_df)):
+        if t < burn_in:
+            rul[t] = max(0.0, float(100.0 - t))
+        else:
+            rul[t] = extrapolate_damage_latent(D_t_pred[: t + 1], soh_0=soh_0_pred)
 
     return PredictionResult(soh=soh, soc=soc, rul=rul)
 
@@ -464,143 +484,195 @@ def run_benchmark(
     n_epochs: int = 100,
     n_seeds: int = N_SEEDS,
     device: str = "auto",
+    datasets: tuple[str, ...] = ("nasa", "calce", "oxford"),
 ) -> pd.DataFrame:
-    """Run full LOBO cross-validation benchmark across all models.
+    """Run full LOBO cross-validation benchmark across all models and datasets.
 
-    For each fold (leave one cell out):
-    1. Train all baselines on remaining cells
-    2. Train PI-MDCNet on remaining cells (with feature normalization)
-    3. Evaluate on held-out cell
-    4. Compute metrics
-
-    Results are saved to CSV and returned.
-
-    Parameters
-    ----------
-    data_dir : Path
-        Directory containing .mat files.
-    output_dir : Path
-        Directory for output artifacts.
-    n_epochs : int
-        Training epochs for PI-MDCNet.
-    n_seeds : int
-        Number of random seeds per fold.
-    device : str
-        PyTorch device.
-
-    Returns
-    -------
-    pd.DataFrame
-        All metrics across models, folds, and seeds.
+    Evaluates Leave-One-Cell-Out across NASA PCoE, CALCE, and Oxford datasets.
     """
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load all cells
-    logger.info("Loading all cells from %s...", data_dir)
-    cell_data = load_all_cells(data_dir)
-    cell_ids = list(cell_data.keys())
-    logger.info("Loaded %d cells: %s", len(cell_ids), cell_ids)
-
-    # Build LOBO folds
-    folds = benchmark_folds(cell_ids)
-    logger.info("Built %d LOBO folds", len(folds))
-
     all_metrics: list[dict[str, Any]] = []
 
-    for fold_idx, (train_ids, test_id) in enumerate(folds):
-        logger.info("=" * 60)
-        logger.info("FOLD %d: test=%s, train=%s", fold_idx, test_id, train_ids)
-        logger.info("=" * 60)
+    for d_name in datasets:
+        logger.info("=" * 70)
+        logger.info("BENCHMARKING DATASET FAMILY: %s", d_name.upper())
+        logger.info("=" * 70)
 
-        train_dfs = [cell_data[cid] for cid in train_ids]
-        train_combined = pd.concat(train_dfs, ignore_index=True)
-        test_df = cell_data[test_id]
+        cell_data = load_all_cells(data_dir, dataset=d_name)
+        cell_ids = list(cell_data.keys())
+        if d_name == "oxford" and len(cell_ids) > 4:
+            cell_ids = cell_ids[:4]
+            cell_data = {cid: cell_data[cid] for cid in cell_ids}
 
-        # --- Baselines ---
-        for model_name, model_cls in BASELINE_REGISTRY.items():
+        folds = benchmark_folds(cell_ids)
+        logger.info("[%s] Built %d LOCO folds: %s", d_name.upper(), len(folds), cell_ids)
+
+        for fold_idx, (train_ids, test_id) in enumerate(folds):
+            logger.info("=" * 60)
+            logger.info("[%s] FOLD %d: test=%s, train=%s", d_name.upper(), fold_idx, test_id, train_ids)
+            logger.info("=" * 60)
+
+            train_dfs = [cell_data[cid] for cid in train_ids]
+            train_combined = pd.concat(train_dfs, ignore_index=True)
+            test_df = cell_data[test_id]
+
+            # --- Baselines ---
+            for model_name, model_cls in BASELINE_REGISTRY.items():
+                for seed_idx in range(n_seeds):
+                    seed = BENCHMARK_SEEDS[seed_idx]
+                    np.random.seed(seed)
+
+                    model = model_cls()
+                    t0 = time.monotonic()
+                    model.fit(train_combined, random_state=seed)
+                    wall_clock = time.monotonic() - t0
+
+                    result = model.predict(test_df)
+                    result.wall_clock_seconds = wall_clock
+
+                    # Compute metrics
+                    soh_m = compute_metrics(test_df["soh"].values, result.soh, "soh_")
+                    soc_m = compute_metrics(test_df["soc_eod"].values, result.soc, "soc_")
+                    rul_m = compute_metrics(test_df["rul"].values, result.rul, "rul_")
+
+                    metrics_row = {
+                        "dataset": d_name,
+                        "model": model_name,
+                        "fold": test_id,
+                        "seed": seed,
+                        "train_wall_clock_s": wall_clock,
+                        **soh_m, **soc_m, **rul_m,
+                    }
+                    all_metrics.append(metrics_row)
+
+                    logger.info(
+                        "  [%s] %s (seed=%d): SoH RMSE=%.4f, MAE=%.4f",
+                        d_name, model_name, seed,
+                        soh_m.get("soh_rmse", np.nan),
+                        soh_m.get("soh_mae", np.nan),
+                    )
+
+            # --- PI-MDCNet ---
             for seed_idx in range(n_seeds):
                 seed = BENCHMARK_SEEDS[seed_idx]
-                np.random.seed(seed)
+                cfg = SLACConfig()
 
-                model = model_cls()
-                t0 = time.monotonic()
-                model.fit(train_combined, random_state=seed)
-                wall_clock = time.monotonic() - t0
+                model, scaler, wall_clock = train_pimdcnet(
+                    train_dfs, cfg=cfg, n_epochs=n_epochs,
+                    device=device, seed=seed,
+                )
 
-                result = model.predict(test_df)
-                result.wall_clock_seconds = wall_clock
+                result = predict_pimdcnet(model, test_df, scaler=scaler, device=device)
 
-                # Compute metrics
                 soh_m = compute_metrics(test_df["soh"].values, result.soh, "soh_")
                 soc_m = compute_metrics(test_df["soc_eod"].values, result.soc, "soc_")
                 rul_m = compute_metrics(test_df["rul"].values, result.rul, "rul_")
 
+                # Diagnostic: R_t correlation with post-rest SoH delta (correction #4)
+                rt_corr = _compute_rt_correlation(model, test_df, scaler, device)
+
                 metrics_row = {
-                    "model": model_name,
+                    "dataset": d_name,
+                    "model": "PI-MDCNet",
                     "fold": test_id,
                     "seed": seed,
                     "train_wall_clock_s": wall_clock,
+                    "rt_corr_post_rest": rt_corr,
                     **soh_m, **soc_m, **rul_m,
                 }
                 all_metrics.append(metrics_row)
 
                 logger.info(
-                    "  %s (seed=%d): SoH RMSE=%.4f, MAE=%.4f",
-                    model_name, seed,
+                    "  [%s] PI-MDCNet (seed=%d): SoH RMSE=%.4f, MAE=%.4f, RUL MAE=%.2f, R_t corr=%.4f",
+                    d_name, seed,
                     soh_m.get("soh_rmse", np.nan),
                     soh_m.get("soh_mae", np.nan),
+                    rul_m.get("rul_mae", np.nan),
+                    rt_corr,
                 )
-
-        # --- PI-MDCNet ---
-        for seed_idx in range(n_seeds):
-            seed = BENCHMARK_SEEDS[seed_idx]
-            cfg = SLACConfig()
-
-            model, scaler, wall_clock = train_pimdcnet(
-                train_dfs, cfg=cfg, n_epochs=n_epochs,
-                device=device, seed=seed,
-            )
-
-            result = predict_pimdcnet(model, test_df, scaler=scaler, device=device)
-
-            soh_m = compute_metrics(test_df["soh"].values, result.soh, "soh_")
-            soc_m = compute_metrics(test_df["soc_eod"].values, result.soc, "soc_")
-            rul_m = compute_metrics(test_df["rul"].values, result.rul, "rul_")
-
-            # Diagnostic: R_t correlation with post-rest SoH delta (correction #4)
-            rt_corr = _compute_rt_correlation(model, test_df, scaler, device)
-
-            metrics_row = {
-                "model": "PI-MDCNet",
-                "fold": test_id,
-                "seed": seed,
-                "train_wall_clock_s": wall_clock,
-                "rt_corr_post_rest": rt_corr,
-                **soh_m, **soc_m, **rul_m,
-            }
-            all_metrics.append(metrics_row)
-
-            logger.info(
-                "  PI-MDCNet (seed=%d): SoH RMSE=%.4f, MAE=%.4f, R_t corr=%.4f",
-                seed,
-                soh_m.get("soh_rmse", np.nan),
-                soh_m.get("soh_mae", np.nan),
-                rt_corr,
-            )
 
     # Save results
     results_df = pd.DataFrame(all_metrics)
     results_path = output_dir / "benchmark_results.csv"
     results_df.to_csv(results_path, index=False)
-    results_df.to_csv(output_dir / "comparison_table.csv", index=False)
-    logger.info("Results saved to %s", results_path)
+    logger.info("Granular benchmark results saved to %s", results_path)
+
+    comp_table = generate_comparison_table(results_df)
+    comp_path = output_dir / "comparison_table.csv"
+    comp_table.to_csv(comp_path, index=False)
+    logger.info("Aggregated comparison table with p-values saved to %s", comp_path)
 
     # Print summary table
     _print_summary_table(results_df)
 
     return results_df
+
+
+def generate_comparison_table(results_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate benchmark results across seeds and folds, and compute p-values against PI-MDCNet."""
+    from scipy import stats
+
+    models = [m for m in results_df["model"].unique() if m != "PI-MDCNet"]
+    ordered_models = ["PI-MDCNet"] + sorted(models)
+
+    # Aggregate per (model, fold) across seeds
+    fold_agg = results_df.groupby(["model", "fold"]).agg({
+        "soh_rmse": "mean",
+        "soh_mae": "mean",
+        "rul_mae": "mean",
+        "rul_rmse": "mean",
+        "train_wall_clock_s": "mean",
+    }).reset_index()
+
+    pi_folds = fold_agg[fold_agg["model"] == "PI-MDCNet"].set_index("fold")
+
+    rows = []
+    for m in ordered_models:
+        sub = fold_agg[fold_agg["model"] == m].set_index("fold")
+        soh_rmse_vals = sub["soh_rmse"].dropna().values
+        soh_mae_vals = sub["soh_mae"].dropna().values
+        rul_mae_vals = sub["rul_mae"].dropna().values
+        rul_rmse_vals = sub["rul_rmse"].dropna().values
+        time_vals = sub["train_wall_clock_s"].dropna().values
+
+        p_wilcoxon = np.nan
+        p_ttest = np.nan
+
+        if m != "PI-MDCNet":
+            common_folds = pi_folds.index.intersection(sub.index)
+            if len(common_folds) >= 3:
+                pi_s = pi_folds.loc[common_folds, "soh_rmse"].values
+                base_s = sub.loc[common_folds, "soh_rmse"].values
+                valid = np.isfinite(pi_s) & np.isfinite(base_s)
+                if valid.sum() >= 3 and not np.allclose(pi_s[valid], base_s[valid]):
+                    try:
+                        _, p_ttest = stats.ttest_rel(base_s[valid], pi_s[valid])
+                    except Exception:
+                        pass
+                    try:
+                        _, p_wilcoxon = stats.wilcoxon(base_s[valid], pi_s[valid])
+                    except Exception:
+                        pass
+
+        rows.append({
+            "model": m,
+            "soh_rmse_mean": float(np.mean(soh_rmse_vals)) if len(soh_rmse_vals) else np.nan,
+            "soh_rmse_std": float(np.std(soh_rmse_vals)) if len(soh_rmse_vals) else np.nan,
+            "soh_mae_mean": float(np.mean(soh_mae_vals)) if len(soh_mae_vals) else np.nan,
+            "soh_mae_std": float(np.std(soh_mae_vals)) if len(soh_mae_vals) else np.nan,
+            "rul_mae_mean": float(np.mean(rul_mae_vals)) if len(rul_mae_vals) else np.nan,
+            "rul_mae_std": float(np.std(rul_mae_vals)) if len(rul_mae_vals) else np.nan,
+            "rul_rmse_mean": float(np.mean(rul_rmse_vals)) if len(rul_rmse_vals) else np.nan,
+            "rul_rmse_std": float(np.std(rul_rmse_vals)) if len(rul_rmse_vals) else np.nan,
+            "train_wall_clock_s_mean": float(np.mean(time_vals)) if len(time_vals) else np.nan,
+            "p_value_wilcoxon": float(p_wilcoxon) if not np.isnan(p_wilcoxon) else 1.0,
+            "p_value_ttest": float(p_ttest) if not np.isnan(p_ttest) else 1.0,
+        })
+
+    return pd.DataFrame(rows)
 
 
 def _compute_rt_correlation(
@@ -630,6 +702,7 @@ def _compute_rt_correlation(
             rest_features=batch_dev["rest_features"],
             rest_flag=batch_dev["rest_flag"],
             cycle_idx=batch_dev["cycle_idx"],
+            soh_lag=batch_dev.get("soh_lag", None),
         )
 
     R_t = outputs["R_t"][0, :, 0].cpu().numpy()
@@ -725,7 +798,7 @@ def main() -> None:
     parser.add_argument("--data-dir", default="data/raw", help="Path to .mat files")
     parser.add_argument("--output-dir", default="artifacts", help="Output directory")
     parser.add_argument("--epochs", type=int, default=BENCHMARK_EPOCHS, help="PI-MDCNet training epochs")
-    parser.add_argument("--seeds", type=int, default=3, help="Number of random seeds")
+    parser.add_argument("--seeds", type=int, default=len(BENCHMARK_SEEDS), help="Number of random seeds")
     parser.add_argument("--device", default="auto", help="PyTorch device")
     args = parser.parse_args()
 

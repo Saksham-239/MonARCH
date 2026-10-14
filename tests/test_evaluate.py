@@ -6,7 +6,7 @@ import pandas as pd
 from experiments.evaluate import run_statistical_analysis
 
 
-def test_rul_wilcoxon_excludes_censored_fold_for_every_comparison():
+def test_rul_wilcoxon_excludes_censored_fold_for_every_comparison(tmp_path):
     """A B0007 RUL NaN is excluded pairwise, while SoH retains all four folds."""
     rows = []
     for model, offset in [("PI-MDCNet", 0.0), ("RandomForest", 1.0)]:
@@ -20,7 +20,7 @@ def test_rul_wilcoxon_excludes_censored_fold_for_every_comparison():
                 "rul_mae": rul + offset if np.isfinite(rul) else np.nan,
             })
 
-    summary = run_statistical_analysis(pd.DataFrame(rows))
+    summary = run_statistical_analysis(pd.DataFrame(rows), output_dir=tmp_path)
     rul_row = summary[summary["Metric"] == "RUL RMSE"].iloc[0]
     soh_row = summary[summary["Metric"] == "SoH RMSE"].iloc[0]
     assert rul_row["N paired"] == 3

@@ -1,4 +1,4 @@
-# AI Operating Rules & Project Guardrails (Rules.md)
+WS# AI Operating Rules & Project Guardrails (Rules.md)
 
 ## 1. Cloud & Financial Safety Guardrails (CRITICAL)
 

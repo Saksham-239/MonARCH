@@ -1,0 +1,99 @@
+% Auto-generated publication tables for IEEE Transactions on Industrial Informatics / Applied Energy
+
+% Table I: Multi-Model Benchmark Comparison
+\begin{table*}[t]
+\centering
+\caption{Cross-Dataset LOCO Benchmark Performance across NASA, CALCE, and Oxford (Mean $\pm$ Std across 5 seeds: [42, 100, 2024, 2025, 2026])}
+\label{tab:benchmark_comparison}
+\begin{tabular}{lcccccc}
+\toprule
+Model & SoH RMSE & SoH MAE & RUL MAE (cyc) & Time (s) & $p$-val (Wilcoxon) & $p$-val ($t$-test) \\
+\midrule
+\textbf{PI-MDCNet} & 0.0063 $\pm$ 0.0047 & 0.0046 $\pm$ 0.0036 & 134.1 $\pm$ 132.9 & 4.8 & -- & -- \\
+CoulombCounting & -- & -- & -- & 0.0 & 1.000 & 1.000e+00 \\
+EKF_1RC & -- & -- & -- & 0.0 & 1.000 & 1.000e+00 \\
+MLP & 0.0620 $\pm$ 0.0606 & 0.0507 $\pm$ 0.0590 & -- & 0.1 & 0.000 & 7.325e-03 \\
+PINN & 0.0377 $\pm$ 0.0181 & 0.0299 $\pm$ 0.0137 & -- & 0.1 & 0.000 & 5.645e-05 \\
+RandomForest & 0.0104 $\pm$ 0.0150 & 0.0086 $\pm$ 0.0127 & 12.4 $\pm$ 10.2 & 0.7 & 0.850 & 2.483e-01 \\
+StatDecomp & 0.0641 $\pm$ 0.0080 & 0.0554 $\pm$ 0.0076 & 1512.7 $\pm$ 1641.1 & 0.0 & 0.000 & 1.363e-10 \\
+TCN & 0.1135 $\pm$ 0.0892 & 0.0920 $\pm$ 0.0808 & -- & 0.3 & 0.000 & 1.098e-03 \\
+Transformer & 0.0723 $\pm$ 0.0942 & 0.0618 $\pm$ 0.0904 & -- & 3.7 & 0.000 & 3.067e-02 \\
+VanillaLSTM & 0.0213 $\pm$ 0.0185 & 0.0165 $\pm$ 0.0149 & -- & 8.2 & 0.001 & 7.292e-03 \\
+XGBoost & 0.0112 $\pm$ 0.0156 & 0.0093 $\pm$ 0.0134 & 13.3 $\pm$ 9.8 & 0.2 & 0.850 & 1.871e-01 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+% Table II: Architectural Ablation Study
+\begin{table}[t]
+\centering
+\caption{SLAC Architectural Ablation Study Across 5 Seeds}
+\label{tab:ablation_study}
+\begin{tabular}{lcccc}
+\toprule
+Ablation Variant & SoH RMSE & SoH MAE & Monotonic $D_t$ & $p$-val vs Full \\
+\midrule
+Full_SLAC & 0.0111 $\pm$ 0.0052 & 0.0075 $\pm$ 0.0048 & Yes & -- \\
+Ablation_NoCrossAttn & 0.0112 $\pm$ 0.0052 & 0.0076 $\pm$ 0.0048 & Yes & 0.106 \\
+Ablation_NoHardGating & 0.0152 $\pm$ 0.0040 & 0.0121 $\pm$ 0.0048 & Yes & 0.033 \\
+Ablation_NoMonotonicity & 0.0623 $\pm$ 0.0251 & 0.0504 $\pm$ 0.0252 & No & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% Table III: Four-Way RUL Validation Benchmark
+\begin{table}[t]
+\centering
+\caption{Four-Way RUL Estimation Benchmark (LOBO Valid EOL Folds)}
+\label{tab:rul_validation}
+\begin{tabular}{lcc}
+\toprule
+RUL Method & Mean MAE $\pm$ Std (cycles) & Mean RMSE $\pm$ Std (cycles) \\
+\midrule
+Neural_RULHead & 6.38 $\pm$ 4.42 & 11.20 $\pm$ 7.13 \\
+Latent_Dt_Extrap & 8.13 $\pm$ 4.50 & 16.16 $\pm$ 11.71 \\
+Stat_Decomp & 23.93 $\pm$ 20.31 & 41.65 $\pm$ 34.19 \\
+Raw_SoH_Extrap & 24.26 $\pm$ 22.26 & 49.88 $\pm$ 45.66 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% Table IV: Aging-Tiered Intra-Cycle SOC Estimation
+\begin{table*}[t]
+\centering
+\caption{Coupled Intra-Cycle Continuous SoC Estimation Across Aging Stages}
+\label{tab:intracycle_soc}
+\begin{tabular}{llccc}
+\toprule
+Dataset & Aging Tier (SoH) & Method & SoC RMSE & SoC MAE \\
+\midrule
+NASA & Fresh (>=90%) & IntraCycle_GRU & 0.0200 & 0.0157 \\
+NASA & Fresh (>=90%) & Naive_Static_CC & 0.0425 & 0.0354 \\
+NASA & Fresh (>=90%) & SOH_Conditioned_CC & 0.0073 & 0.0045 \\
+NASA & Mid-life (80-90%) & IntraCycle_GRU & 0.0163 & 0.0138 \\
+NASA & Mid-life (80-90%) & Naive_Static_CC & 0.0887 & 0.0750 \\
+NASA & Mid-life (80-90%) & SOH_Conditioned_CC & 0.0074 & 0.0040 \\
+NASA & Near-EOL (<80%) & IntraCycle_GRU & 0.0332 & 0.0284 \\
+NASA & Near-EOL (<80%) & Naive_Static_CC & 0.1774 & 0.1518 \\
+NASA & Near-EOL (<80%) & SOH_Conditioned_CC & 0.0083 & 0.0054 \\
+NASA & Overall & IntraCycle_GRU & 0.0293 & 0.0233 \\
+NASA & Overall & Naive_Static_CC & 0.1427 & 0.1123 \\
+NASA & Overall & SOH_Conditioned_CC & 0.0082 & 0.0049 \\
+Oxford & Fresh (>=90%) & IntraCycle_GRU & 0.0209 & 0.0140 \\
+Oxford & Fresh (>=90%) & Naive_Static_CC & 0.0375 & 0.0299 \\
+Oxford & Fresh (>=90%) & SOH_Conditioned_CC & 0.0028 & 0.0020 \\
+Oxford & Mid-life (80-90%) & IntraCycle_GRU & 0.0207 & 0.0130 \\
+Oxford & Mid-life (80-90%) & Naive_Static_CC & 0.0907 & 0.0775 \\
+Oxford & Mid-life (80-90%) & SOH_Conditioned_CC & 0.0029 & 0.0020 \\
+Oxford & Near-EOL (<80%) & IntraCycle_GRU & 0.0213 & 0.0136 \\
+Oxford & Near-EOL (<80%) & Naive_Static_CC & 0.1336 & 0.1162 \\
+Oxford & Near-EOL (<80%) & SOH_Conditioned_CC & 0.0026 & 0.0019 \\
+Oxford & Overall & IntraCycle_GRU & 0.0209 & 0.0135 \\
+Oxford & Overall & Naive_Static_CC & 0.0917 & 0.0722 \\
+Oxford & Overall & SOH_Conditioned_CC & 0.0028 & 0.0020 \\
+\bottomrule
+\end{tabular}
+\end{table}

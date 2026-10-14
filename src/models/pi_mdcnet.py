@@ -74,6 +74,12 @@ class SLACConfig:
     attn_dim: int = 64
     """Fused embedding dimension (h_t) after cross-attention."""
 
+    n_tokens: int = 4
+    """Number of multi-modal embedding tokens for multi-head attention."""
+
+    token_dim: int = 16
+    """Per-token dimension (n_tokens * token_dim == attn_dim)."""
+
     n_attn_heads: int = 4
     """Number of attention heads in the cross-attention block."""
 
@@ -136,6 +142,10 @@ class SLACConfig:
     lambda_sparse: float = 0.01
     """Weight for L1 sparsity on R_t (belt-and-suspenders, not primary
     mechanism -- the hard gate is the primary control)."""
+
+    lambda_mono_damage: float = 0.01
+    """Weight for physics-informed monotonicity penalty on irreversible damage increments (dD/dt >= 0).
+    Applied EXCLUSIVELY to the irreversible damage head, NEVER to total SOH (which permits rest regeneration)."""
 
     # -- Training --
     learning_rate: float = 2e-3
@@ -234,20 +244,21 @@ class CrossAttentionBlock(nn.Module):
 
     def __init__(self, cfg: SLACConfig) -> None:
         super().__init__()
+        self.cfg = cfg
         # Project both to same dimension for attention
         self.proj_e = nn.Linear(cfg.elec_embed_dim, cfg.attn_dim)
         self.proj_th = nn.Linear(cfg.therm_embed_dim, cfg.attn_dim)
 
-        # Cross-attention: electrical queries thermal
+        # Cross-attention across L=4 tokens of dimension d_k=16 with 4 heads (head_dim=4)
         self.cross_attn_e2th = nn.MultiheadAttention(
-            embed_dim=cfg.attn_dim,
+            embed_dim=cfg.token_dim,
             num_heads=cfg.n_attn_heads,
             dropout=cfg.attn_dropout,
             batch_first=True,
         )
         # Cross-attention: thermal queries electrical
         self.cross_attn_th2e = nn.MultiheadAttention(
-            embed_dim=cfg.attn_dim,
+            embed_dim=cfg.token_dim,
             num_heads=cfg.n_attn_heads,
             dropout=cfg.attn_dropout,
             batch_first=True,
@@ -267,16 +278,17 @@ class CrossAttentionBlock(nn.Module):
         -------
         h_t : Tensor, shape (B, attn_dim)
         """
-        # Project to attention dimension and add sequence dim (length 1)
-        e_proj = self.proj_e(e_t).unsqueeze(1)   # (B, 1, attn_dim)
-        th_proj = self.proj_th(th_t).unsqueeze(1)  # (B, 1, attn_dim)
+        B = e_t.size(0)
+        # Reshape to (B, L=4, d_k=16) tokens
+        e_proj = self.proj_e(e_t).view(B, self.cfg.n_tokens, self.cfg.token_dim)
+        th_proj = self.proj_th(th_t).view(B, self.cfg.n_tokens, self.cfg.token_dim)
 
         # Cross attention: e queries th, th queries e
         e_attended, _ = self.cross_attn_e2th(e_proj, th_proj, th_proj)
         th_attended, _ = self.cross_attn_th2e(th_proj, e_proj, e_proj)
 
-        # Combine via sum + residual and squeeze
-        h_t = self.norm(e_attended + th_attended).squeeze(1)  # (B, attn_dim)
+        # Combine via sum and layer norm over 64-dim embedding
+        h_t = self.norm((e_attended + th_attended).reshape(B, self.cfg.attn_dim))
         return h_t
 
 
@@ -365,6 +377,7 @@ class RegenerationBranch(nn.Module):
 
     def __init__(self, cfg: SLACConfig) -> None:
         super().__init__()
+        self.cfg = cfg
         self.r_max = cfg.r_max
 
         # Embed rest features
@@ -374,9 +387,9 @@ class RegenerationBranch(nn.Module):
             nn.Linear(cfg.rest_embed_dim, cfg.attn_dim),
         )
 
-        # Cross attention: rest queries backbone
+        # Cross attention across L=4 tokens of dimension d_k=16 with 4 heads (head_dim=4)
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=cfg.attn_dim,
+            embed_dim=cfg.token_dim,
             num_heads=cfg.n_attn_heads,
             dropout=cfg.attn_dropout,
             batch_first=True,
@@ -396,7 +409,7 @@ class RegenerationBranch(nn.Module):
         h_t: Tensor,
         rest_flag: Tensor,
     ) -> Tensor:
-        """Compute gated regeneration R_t.
+        """Compute gated regeneration R_t via multi-token cross-attention.
 
         Parameters
         ----------
@@ -412,16 +425,17 @@ class RegenerationBranch(nn.Module):
         R_t : Tensor, shape (B, 1)
             Regeneration estimate. Exactly 0.0 when rest_flag = 0.
         """
-        # Embed rest features
-        rest_emb = self.rest_embed(rest_features).unsqueeze(1)  # (B, 1, attn_dim)
-        h_kv = h_t.unsqueeze(1)  # (B, 1, attn_dim)
+        B = rest_features.size(0)
+        # Embed rest features and reshape to (B, L=4, d_k=16) tokens
+        rest_emb = self.rest_embed(rest_features).view(B, self.cfg.n_tokens, self.cfg.token_dim)
+        h_kv = h_t.view(B, self.cfg.n_tokens, self.cfg.token_dim)
 
         # Cross-attention: rest queries backbone state
         regen_attn, _ = self.cross_attn(rest_emb, h_kv, h_kv)
-        regen_attn = regen_attn.squeeze(1)  # (B, attn_dim)
+        regen_flat = regen_attn.reshape(B, self.cfg.attn_dim)
 
         # Predict regeneration magnitude, scale, and gate
-        R_raw = self.mlp_regen(regen_attn)  # (B, 1), in [-1, 1]
+        R_raw = self.mlp_regen(regen_flat)  # (B, 1), in [-1, 1]
         R_t = rest_flag * self.r_max * R_raw  # hard gate
 
         return R_t
@@ -565,6 +579,8 @@ class PIMDCNet(nn.Module):
         rest_features: Tensor,
         rest_flag: Tensor,
         cycle_idx: Tensor,
+        soh_lag: Tensor | None = None,
+        initial_soh: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Forward pass over a SEQUENCE of cycles.
 
@@ -586,6 +602,10 @@ class PIMDCNet(nn.Module):
             Binary rest flag per cycle.
         cycle_idx : Tensor, shape (B, T, 1)
             Normalized cycle index per cycle.
+        soh_lag : Tensor, optional, shape (B, T, 1)
+            Causal lagged SoH from preceding cycle (t-1).
+        initial_soh : Tensor, optional, shape (B, 1, 1) or float
+            Initial cell SoH at cycle 0.
 
         Returns
         -------
@@ -620,8 +640,13 @@ class PIMDCNet(nn.Module):
         R_flat = self.regen_branch(rest_flat, h_flat, rest_fl_flat)
         R_seq = R_flat.reshape(B, T, 1)
 
-        # 5. SoH decomposition
-        soh_seq = self.soh_0 - D_seq + R_seq  # (B, T, 1)
+        # 5. SoH decomposition (supports causal lag, cell-specific initial SoH, or global SoH_0)
+        if soh_lag is not None:
+            soh_seq = soh_lag - inc_seq + R_seq
+        elif initial_soh is not None:
+            soh_seq = initial_soh - D_seq + R_seq
+        else:
+            soh_seq = self.soh_0 - D_seq + R_seq
 
         # 6. SoC head
         soc_seq = self.soc_head(h_flat).reshape(B, T, 1)
@@ -717,11 +742,22 @@ class SLACLoss(nn.Module):
         # L1 sparsity on R_t
         sparse_loss = predictions["R_t"].abs().mean()
 
+        # Physics-informed loss: strictly enforced on irreversible damage branch D_t.
+        # Monotonicity constraint (dD/dt >= 0) is applied EXCLUSIVELY to delta_D increments,
+        # ensuring that positive d(SOH)/dt from legitimate electrochemical rest regeneration
+        # is never penalized.
+        damage_inc = predictions.get("damage_increments", None)
+        if damage_inc is not None:
+            mono_damage_loss = F.relu(-damage_inc).mean()
+        else:
+            mono_damage_loss = torch.tensor(0.0, device=predictions["soh"].device)
+
         total = (
-            soc_loss
-            + soh_loss
+            50.0 * soh_loss
+            + 0.1 * soc_loss
             + self.cfg.lambda_rul * rul_loss
             + self.cfg.lambda_sparse * sparse_loss
+            + self.cfg.lambda_mono_damage * mono_damage_loss
         )
 
         return {
@@ -730,6 +766,7 @@ class SLACLoss(nn.Module):
             "soh_loss": soh_loss,
             "rul_loss": rul_loss,
             "sparse_loss": sparse_loss,
+            "mono_damage_loss": mono_damage_loss,
         }
 
 
