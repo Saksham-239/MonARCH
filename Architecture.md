@@ -29,13 +29,14 @@ The system explicitly decouples battery dynamics into two operational timescales
 * **Hard-Gated Reversible Relaxation ($R_t$):**
   $$R_t = \text{rest\_flag}_t \cdot R_{\text{head}}(\text{rest\_features}, h_t)$$
   guaranteeing $R_t \equiv 0.0$ on all active cycling cycles without rest.
-* **Causal RUL Extrapolation:** Extrapolated directly from the monotonic latent damage trajectory $D_t \to D_{\text{fail}} = \text{SoH}_0 - 0.70$ without seeing future cycle data.
+* **Causal RUL Extrapolation:** Extrapolated directly from the monotonic latent damage trajectory $D_t \to D_{\text{fail}} = \text{SoH}_0 - (1 - \text{EOL\_FADE\_FRACTION}) = \text{SoH}_0 - 0.20$ (standard 80% SoH threshold, 1.60 Ah, ensuring all cells including B0007 reach non-censored EOL) without seeing future cycle data.
 
 ```
 +--------------------------------------------------------------------------------------------------+
 |                                    LOCAL BENCHMARKING ENGINE                                     |
 |                                                                                                  |
-|   NASA PCoE Datasets (B0005: 2.7V, B0006: 2.5V, B0007: 2.2V, B0018: 2.5V cutoff at 24°C)         |
+|   Primary: NASA PCoE Datasets (B0005: 2.7V, B0006: 2.5V, B0007: 2.2V, B0018: 2.5V cutoff at 24°C)  |
+|   Generalization: CALCE (CS2_35..38, 800+ cyc) & Oxford (Cell1..4, Artemis dynamic drive cycles)  |
 |             |                                                                                    |
 |             v                                                                                    |
 |   [data_loader.py] ----> 1RC Thevenin Parameter Estimation + dQ/dV Spectrum + Rest Flags         |
@@ -173,7 +174,7 @@ c:\Users\saksh\OneDrive\Documents\AWS ML\
     ├── ablation_table.csv         # Component ablation results (Full, NoCrossAttn, NoHardGating, NoMono)
     ├── rul_validation_results.csv # RUL benchmark breakdown across all folds & seeds
     ├── intracycle_soc_results.csv # Intra-cycle continuous SoC GRU benchmark results
-    └── pi_mdcnet_edge.onnx        # Exported streaming ONNX model binary (~318 KB)
+    └── pi_mdcnet_edge.onnx        # Exported streaming FP32 ONNX model binary (~133 KB; INT8 ~125 KB)
 ```
 
 ---

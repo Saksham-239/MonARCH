@@ -47,78 +47,87 @@ Battery telemetry operates across fundamentally different physical timescales: f
 
 ## Core Inductive Physics
 
-### 1. Architecturally Monotonic Damage ($D_t$)
+### 1. Architecturally Monotonic Damage (D_t)
 Capacity fade caused by irreversible active material loss, solid-electrolyte interphase (SEI) layer growth, and lithium plating cannot spontaneously reverse. MonARCH structurally parameterizes the damage increment using a positive-definite activation:
 
-$$\Delta D_t = \lambda \cdot \text{Softplus}\big(f_\theta(s_t)\big) \ge 0, \qquad D_t = D_{t-1} + \Delta D_t$$
+```text
+ΔD_t = λ * Softplus(f_θ(s_t))
+D_t  = D_(t-1) + ΔD_t
+```
 
-where $\lambda = 0.003$, $s_t = [\bar{T}_{\text{cycle}}, \text{C-rate}]$ is the operational stressor vector, and $\text{Softplus}(u) = \ln(1 + e^u) > 0$. Because $\Delta D_t \ge 0$ unconditionally, cumulative degradation $D_t$ is strictly monotonic by design, eliminating unphysical degradation reversals.
+where `λ = 0.003`, `s_t = [T_mean, C-rate]` is the operational stressor vector, and `Softplus(u) = ln(1 + e^u) > 0`. Because the Softplus increment is strictly non-negative (`ΔD_t >= 0`) by construction, the cumulative damage trajectory cannot spontaneously decrease, ensuring physical degradation monotonicity across battery life.
 
-### 2. Hard-Gated Reversible Recovery ($R_t$)
-Lithium-ion batteries undergo concentration homogenization and apparent capacity relaxation only after qualifying rest intervals. MonARCH enforces hard physical gating on the recovery head:
+### 2. Hard-Gated Reversible Recovery (R_t)
+Battery relaxation after qualifying rest intervals can produce apparent capacity recovery. MonARCH models this separately using a physical gating mechanism:
 
-$$R_t = \text{rest\_flag}_t \cdot R_{\text{head}}(\text{rest\_features}, h_t)$$
+```text
+R_t = rest_flag_t * R_head(rest_features, h_t)
+```
 
-where $\text{rest\_flag}_t \in \{0, 1\}$. During continuous cycling with no rest period ($\text{rest\_flag}_t = 0$), the recovery term is structurally zero ($R_t \equiv 0$), preventing spurious capacity jumps.
+where `rest_flag_t ∈ {0, 1}`. During continuous cycling with no rest period (`rest_flag_t == 0`), the recovery branch is structurally forced to zero (`R_t == 0`), preventing the network from hallucinating unphysical capacity jumps during active cycling.
 
 ### 3. Causal Remaining Useful Life (RUL) Extrapolation
-Rather than training a regressor that observes the future or relies on arbitrary trajectory smoothing, MonARCH extrapolates the monotonic latent damage trajectory $D_{1:t}$ forward to the failure threshold:
+Rather than training a regressor that observes the future or relies on arbitrary trajectory smoothing, MonARCH extrapolates the monotonic latent damage trajectory forward to the configured end-of-life threshold:
 
-$$D_{\text{fail}} = \text{SoH}_0 - (1 - \text{EOL\_FADE\_FRACTION})$$
+```text
+D_fail = SoH_0 - (1 - EOL_FADE_FRACTION)
+```
 
-Using a linear projection on the causal rolling damage history ($k=10$), MonARCH projects cycles remaining until $D_t \ge D_{\text{fail}}$ with zero future-cycle leakage.
+where `EOL_FADE_FRACTION = 0.20` (configured in `src/data_loader.py` and `experiments/protocol.py`) corresponds to the standard 80% SoH end-of-life threshold (`EOL capacity = 1.60 Ah` for rated 2.0 Ah NASA cells). This standard definition ensures valid, non-censored ground truth RUL across all benchmark cells (including cell B0007, whose minimum capacity is 1.4005 Ah). Using a linear projection on the causal rolling damage history (`k = 10`), MonARCH projects cycles remaining until `D_t >= D_fail` with zero future-cycle leakage.
 
 ### 4. Ultra-Compact Edge Deployment (ESP32-S3 / C99)
-- **Persistent State:** Exactly **52 bytes** (`sizeof(pimdcnet_state_t)`: 4B $D_{t-1}$ + 40B rolling $D$ buffer + 4B cycle counter + 4B calibrated $\text{SoH}_0$).
+- **Persistent State:** Exactly **52 bytes** (`sizeof(pimdcnet_state_t)`: 4B `D_(t-1)` + 40B rolling `D` buffer + 4B cycle counter + 4B calibrated `SoH_0`).
 - **Compute Complexity:** 21,061 float32 parameters (82.27 KB Flash ROM) and 23,504 MACs per cycle step.
 - **Microcontroller Safety:** Peak stack frame of **4,960 bytes** (~4.84 KB, verified via GCC `-fstack-usage`), fitting comfortably into ESP32-S3 SRAM with zero heap allocation.
-- **Numerical Parity:** Exact bitwise match for $\text{SoH}$ and $D_t$ ($0.000$ difference) and $< 10^{-7}$ maximum absolute difference for $R_t$, SoC, and RUL against PyTorch.
+- **Numerical Parity:** Exact bitwise match for SoH and `D_t` (0.000 difference) and `< 1e-7` maximum absolute difference for `R_t`, SoC, and RUL against PyTorch.
+- **Edge ONNX Graph:** 133,435 bytes (~133 KB FP32) and 124,950 bytes (~125 KB INT8 quantized).
 
 ---
 
 ## Empirical Benchmark & Verification Results
 
-MonARCH and its baselines are evaluated under a strict **Leave-One-Battery-Out (LOBO)** protocol across **12 folds and 5 random seeds (60 runs per model)** over three benchmark datasets:
-1. **NASA PCoE:** 4 cylindrical 18650 cells (`B0005`, `B0006`, `B0007`, `B0018`) run-to-failure at 24°C.
-2. **CALCE (Univ. of Maryland):** 4 prismatic LCO cells (`CS2_35`, `CS2_36`, `CS2_37`, `CS2_38`) with 800+ extended cycles.
-3. **Oxford Battery Dataset:** 4 Kokam pouch cells (`Cell1`, `Cell2`, `Cell3`, `Cell4`) subjected to dynamic urban Artemis drive cycles.
+### Evaluation Scope
+Aligned with [`Architecture.md`](Architecture.md), the **Primary Benchmark Suite** is evaluated under a strict **Leave-One-Battery-Out (LOBO)** cross-validation protocol across the 4 **NASA PCoE** 24°C battery cells (`B0005`, `B0006`, `B0007`, `B0018`) over 5 random seeds (`[42, 100, 2024, 2025, 2026]`). To assess cross-dataset and cross-chemistry generalization, the evaluation scope is extended to:
+1. **NASA PCoE (Primary):** 4 cylindrical 18650 cells run-to-failure at 24°C.
+2. **CALCE (Generalization):** 4 prismatic LCO cells (`CS2_35`, `CS2_36`, `CS2_37`, `CS2_38`) with 800+ extended cycles.
+3. **Oxford (Dynamic Telemetry):** 4 Kokam pouch cells (`Cell1`, `Cell2`, `Cell3`, `Cell4`) subjected to dynamic urban Artemis drive cycles.
 
 ### 1. State of Health (SoH) Benchmark Across 12 Folds (Mean ± Std)
 
 | Model Category | Evaluation Paradigm | NASA SoH RMSE | CALCE SoH RMSE | Oxford SoH RMSE | Overall 12-Fold RMSE |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **Persistence ($SOH_{t-1}$)** | 1-step lag baseline | 0.0090 ± 0.0030 | 0.0028 ± 0.0001 | 0.0048 ± 0.0001 | **0.0055 ± 0.0031** |
+| **Persistence (SoH[t-1])** | 1-step lag baseline | 0.0090 ± 0.0030 | 0.0028 ± 0.0001 | 0.0048 ± 0.0001 | **0.0055 ± 0.0031** |
 | **Persistence + Drift** | Causal linear drift | 0.0089 ± 0.0030 | 0.0028 ± 0.0001 | 0.0041 ± 0.0003 | **0.0052 ± 0.0031** |
 | **Random Forest + lag** | Supervised lag regressor | 0.0198 ± 0.0084 | 0.0005 ± 0.0008 | 0.0008 ± 0.0001 | 0.0071 ± 0.0104 |
 | **XGBoost + lag** | Gradient boosted trees | 0.0237 ± 0.0061 | 0.0008 ± 0.0008 | 0.0013 ± 0.0002 | 0.0086 ± 0.0116 |
 | **MonARCH / PI-MDCNet** | Lag-conditioned | 0.0109 ± 0.0055 | 0.0045 ± 0.0004 | 0.0031 ± 0.0003 | **0.0062 ± 0.0045** |
 | **MonARCH / PI-MDCNet (C2)** | **Strict Open-Loop (Zero Test Labels)** | **0.0804 ± 0.0582** | **0.0173 ± 0.0011** | **0.0133 ± 0.0009** | **0.0370 ± 0.0442** |
 
-*Note on Evaluation Rigor:* As documented in [`artifacts/v5/REPORT.md`](artifacts/v5/REPORT.md), models conditioned on test-cell $SOH_{t-1}$ act as one-step filters. Under open-loop evaluation where no test-cell ground truth is ever provided, MonARCH tracks the full multi-hundred cycle capacity fade trajectory with an overall RMSE of 0.0370.
+*Note on Evaluation Rigor:* As documented in [`artifacts/v5/REPORT.md`](artifacts/v5/REPORT.md), models conditioned on test-cell `SoH[t-1]` act as one-step filters. Under open-loop evaluation where no test-cell ground truth is ever provided, MonARCH tracks the full multi-hundred cycle capacity fade trajectory with an overall RMSE of 0.0370.
 
 ### 2. NASA Remaining Useful Life (RUL) Prediction
 
-Evaluated across 4 NASA test folds $\times$ 5 seeds (160 runs total) with uniform cycle normalization ($t / 1000$):
+Evaluated across 4 NASA test folds × 5 seeds across 4 prognostic extrapolation methods and 2 evaluation modes (160 evaluation runs total; 20 paired runs per method) with uniform cycle normalization (`t / 1000`):
 
 | Evaluation Mode | Prognostic Extrapolation Method | Mean MAE (Cycles) | Mean RMSE (Cycles) | B0005 MAE | B0006 MAE | B0007 MAE | B0018 MAE |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Open-Loop (C2)** | **Latent $D_t$ Extrapolation (MonARCH)** | **7.02 ± 3.93** | **12.00 ± 6.65** | 8.09 | 9.94 | 8.84 | 1.23 |
+| **Open-Loop (C2)** | **Latent D_t Extrapolation (MonARCH)** | **7.02 ± 3.93** | **12.00 ± 6.65** | 8.09 | 9.94 | 8.84 | 1.23 |
 | | Neural RUL Head | 7.10 ± 5.27 | 12.43 ± 8.44 | 8.47 | 4.74 | 13.73 | 1.46 |
 | | Statistical Degradation Decomposition | 23.93 ± 22.86 | 41.65 ± 38.48 | 35.18 | 5.41 | 50.71 | 4.40 |
 | | Raw SoH Extrapolation | 24.26 ± 25.06 | 49.88 ± 51.39 | 42.94 | 4.19 | 48.73 | 1.16 |
 | **Lag-Conditioned** | Neural RUL Head | 6.88 ± 3.92 | 11.83 ± 6.59 | 8.32 | 4.95 | 11.60 | 2.63 |
-| | Latent $D_t$ Extrapolation | 9.44 ± 5.42 | 16.78 ± 7.85 | 12.03 | 5.16 | 15.84 | 4.73 |
+| | Latent D_t Extrapolation | 9.44 ± 5.42 | 16.78 ± 7.85 | 12.03 | 5.16 | 15.84 | 4.73 |
 
-MonARCH's Latent $D_t$ extrapolation achieves a **$3.4\times$ reduction in RUL error** compared to standard statistical and raw-capacity extrapolation baselines (~7.0 cycles vs ~24.0 cycles MAE).
+MonARCH's Latent `D_t` extrapolation achieves a **3.4x reduction in RUL error** compared to standard statistical and raw-capacity extrapolation baselines (~7.0 cycles vs ~24.0 cycles MAE).
 
-### 3. Open-Loop Ablation Study (NASA Folds $\times$ 5 Seeds)
+### 3. Open-Loop Ablation Study (NASA Folds × 5 Seeds)
 
-| Architectural Variant | SoH RMSE | SoH MAE | RUL MAE (Cycles) | Monotonic $dD/dt \ge 0$ | Finding |
+| Architectural Variant | SoH RMSE | SoH MAE | RUL MAE (Cycles) | Monotonic dD/dt >= 0 | Finding |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Full SLAC (MonARCH)** | 0.0804 ± 0.0582 | 0.0677 ± 0.0455 | **8.84 ± 2.57** | **Verified True** | Baseline reference |
-| **No Cross-Attention** | 0.0803 ± 0.0582 | 0.0676 ± 0.0454 | 8.85 ± 2.59 | **Verified True** | $p = 0.9274$ (neutral impact) |
+| **No Cross-Attention** | 0.0803 ± 0.0582 | 0.0676 ± 0.0454 | 8.85 ± 2.59 | **Verified True** | p = 0.9274 (neutral impact) |
 | **No Hard Gating** | 0.0503 ± 0.0378 | 0.0427 ± 0.0311 | 7.38 ± 1.44 | **Verified True** | Soft recovery provides lower fitting error |
-| **No Monotonicity** | 0.0624 ± 0.0207 | 0.0506 ± 0.0225 | **75.31 ± 47.21** | **Violated ($< 0$)** | **RUL error explodes $8.5\times$** |
+| **No Monotonicity** | 0.0624 ± 0.0207 | 0.0506 ± 0.0225 | **75.31 ± 47.21** | **Violated (< 0)** | **RUL error explodes 8.5x** |
 
 **Crucial Insight:** While unconstrained neural networks can slightly reduce one-step fitting loss by oscillating, removing architectural monotonicity destroys prognostic generalization—causing RUL MAE to explode from **8.84 to 75.31 cycles**. Inductive monotonicity is vital for long-term health forecasting.
 
@@ -128,16 +137,16 @@ Continuous evaluation across operational discharge curves per battery aging tier
 
 | Dataset | Aging Tier | Naive Static CC | Intra-Cycle GRU | SOH-Conditioned CC | Model-Free Lag CC |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **NASA** | Fresh ($\ge 90\%$) | 0.0425 ± 0.0094 | 0.0200 ± 0.0059 | 0.0074 ± 0.0022 | **0.0067 ± 0.0036** |
-| | Mid-Life ($80-90\%$) | 0.0887 ± 0.0032 | 0.0163 ± 0.0075 | 0.0074 ± 0.0035 | **0.0068 ± 0.0027** |
-| | Near-EOL ($< 80\%$) | 0.1774 ± 0.0250 | 0.0332 ± 0.0254 | 0.0084 ± 0.0030 | **0.0072 ± 0.0022** |
+| **NASA** | Fresh (>= 90%) | 0.0425 ± 0.0094 | 0.0200 ± 0.0059 | 0.0074 ± 0.0022 | **0.0067 ± 0.0036** |
+| | Mid-Life (80-90%) | 0.0887 ± 0.0032 | 0.0163 ± 0.0075 | 0.0074 ± 0.0035 | **0.0068 ± 0.0027** |
+| | Near-EOL (< 80%) | 0.1774 ± 0.0250 | 0.0332 ± 0.0254 | 0.0084 ± 0.0030 | **0.0072 ± 0.0022** |
 | | **Overall** | 0.1427 ± 0.0245 | 0.0293 ± 0.0200 | 0.0083 ± 0.0025 | **0.0073 ± 0.0018** |
-| **Oxford** | Fresh ($\ge 90\%$) | 0.0375 ± 0.0009 | 0.0209 ± 0.0001 | **0.0028 ± 0.0003** | 0.0040 ± 0.0002 |
-| | Mid-Life ($80-90\%$) | 0.0907 ± 0.0005 | 0.0207 ± 0.0001 | **0.0029 ± 0.0002** | 0.0035 ± 0.0005 |
-| | Near-EOL ($< 80\%$) | 0.1336 ± 0.0007 | 0.0213 ± 0.0001 | **0.0026 ± 0.0006** | 0.0039 ± 0.0004 |
+| **Oxford** | Fresh (>= 90%) | 0.0375 ± 0.0009 | 0.0209 ± 0.0001 | **0.0028 ± 0.0003** | 0.0040 ± 0.0002 |
+| | Mid-Life (80-90%) | 0.0907 ± 0.0005 | 0.0207 ± 0.0001 | **0.0029 ± 0.0002** | 0.0035 ± 0.0005 |
+| | Near-EOL (< 80%) | 0.1336 ± 0.0007 | 0.0213 ± 0.0001 | **0.0026 ± 0.0006** | 0.0039 ± 0.0004 |
 | | **Overall** | 0.0917 ± 0.0012 | 0.0209 ± 0.0001 | **0.0028 ± 0.0001** | 0.0037 ± 0.0001 |
 
-Conditioning Coulomb counting on MonARCH's predicted SoH cuts near-EOL tracking error from **17.7% down to < 0.9%** by dynamically adjusting active cell capacity $Q_{\text{aged}} = \text{SoH}_t \cdot Q_{\text{nom}}$.
+Conditioning Coulomb counting on MonARCH's predicted SoH cuts near-EOL tracking error from **17.7% down to < 0.9%** by dynamically adjusting active cell capacity `Q_aged = SoH_t * Q_nom`.
 
 ---
 

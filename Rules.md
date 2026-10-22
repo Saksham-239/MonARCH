@@ -47,7 +47,7 @@ WS# AI Operating Rules & Project Guardrails (Rules.md)
 * **Leave-One-Battery-Out (LOBO-CV):** Always evaluate models by training on $N-1$ battery cells and testing on the held-out cell across all 4 folds ($B0005, B0006, B0007, B0018$). Chronological within-cell splits are prohibited for cross-cell claims.
 * **NO Claims of Formal Statistical Significance:** The benchmark contains only $N=4$ cells (and $N=3$ valid EOL cells for RUL). The minimum possible two-sided Wilcoxon signed-rank $p$-values are $p=0.125$ ($N=4$) and $p=0.250$ ($N=3$). Seeds are repeated stochastic initializations, NOT independent battery samples. Do not treat 12 runs as $N=12$ independent experiments.
 * **NO Claim of Cross-Attention Dominance:** The ablation difference between Full SLAC ($0.0573$) and NoCrossAttn ($0.0574$) is negligible ($0.0001$ RMSE). Cross-attention must be described as an architectural mechanism, not a primary performance driver.
-* **NO Memory Conflation:** 32 bytes refers strictly to persistent streaming state (`pimdcnet_state_t`). Never claim the neural network (318 KB ONNX) runs in 32 bytes.
+* **NO Memory Conflation:** 52 bytes refers strictly to persistent streaming state (`pimdcnet_state_t`). Never claim the neural network (~133 KB ONNX) runs in 52 bytes.
 * **NO Universal RUL Superiority Claims:** Latent-$D_t$ extrapolation outperforms trees on B0005 and B0018, but is outperformed by linear extrapolation and trees on B0006. All per-cell failure cases must be preserved.
 * **NO Unvalidated External Generalization Claims:** The model has been evaluated strictly on the NASA PCoE 4-cell benchmark. External generalization to other chemistries or datasets (Oxford, CALCE, Stanford) remains unproven future work.
 
