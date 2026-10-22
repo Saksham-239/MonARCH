@@ -48,8 +48,8 @@ The system explicitly decouples battery dynamics into two operational timescales
 |             +---> 4-Way Component Ablation Engine (Full, NoCrossAttn, NoHardGating, NoMono)       |
 |             |                                                                                    |
 |             v                                                                                    |
-|   [export_onnx.py] ----> pi_mdcnet_edge.onnx (OpSet 14, ~318 KB, CPU-optimized)                 |
-|   [embedded/esp32] ----> C99 Streaming Engine (ESP32-S3 / Xtensa LX7, 32-Byte State)             |
+|   [export_onnx.py] ----> pi_mdcnet_edge.onnx (OpSet 14, ~133 KB, CPU-optimized)                 |
+|   [embedded/esp32] ----> C99 Streaming Engine (ESP32-S3 / Xtensa LX7, 52-Byte State)             |
 +--------------------------------------------------------------------------------------------------+
                                                  |
                                                  | (Deploy model artifact to AWS Lambda)
@@ -139,7 +139,7 @@ c:\Users\saksh\OneDrive\Documents\AWS ML\
 │   └── esp32/                     # Pure C99 BMS state engine (ESP32-S3 / Xtensa LX7)
 │       ├── CMakeLists.txt
 │       └── main/
-│           ├── pi_mdcnet_inference.h  # 32-byte persistent state definition & interface
+│           ├── pi_mdcnet_inference.h  # 52-byte persistent state definition & interface
 │           ├── pi_mdcnet_inference.c  # Analytical streaming degradation/recovery closures
 │           └── main.c                 # Standalone cycle-by-cycle simulation harness
 │

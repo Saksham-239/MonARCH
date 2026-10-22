@@ -1,252 +1,341 @@
 # MonARCH — Physics-Guided Battery State & RUL Prediction
 
-**MonARCH** (*Monotonic Aging and Recovery-Constrained Neural State-Space Network*) is a physics-guided deep-learning framework for estimating **State of Charge (SoC), State of Health (SoH), and Remaining Useful Life (RUL)** of lithium-ion batteries.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)](https://www.python.org/)
+[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
+[![Embedded: ESP32--S3](https://img.shields.io/badge/Embedded-ESP32--S3%20%2F%20Xtensa-red.svg)](embedded/esp32/)
+[![Edge: ONNX Runtime](https://img.shields.io/badge/Edge-ONNX%20Runtime-blue.svg)](artifacts/)
+[![Tests: Pytest](https://img.shields.io/badge/Tests-Passing-success.svg)](tests/)
 
-The core idea is simple: instead of asking a neural network to learn physically implausible battery behaviour and then punishing it with loss terms, important constraints are built directly into the architecture.
+**MonARCH** (*Monotonic Aging and Recovery-Constrained Neural State-Space Network*) is an open-source, physics-guided deep-learning framework for joint estimation of **State of Charge (SoC), State of Health (SoH), and Remaining Useful Life (RUL)** in lithium-ion battery management systems (BMS).
 
-> **MonARCH = learned degradation + physically constrained recovery + causal RUL extrapolation + edge deployment.**
+Standard data-driven models frequently predict physically implausible battery behaviors—such as spontaneous capacity recovery during continuous discharge, non-causal label leakage, or non-monotonic degradation paths. MonARCH embeds governing physical principles directly into the neural network architecture rather than relying on weak loss regularization.
 
-## Why This Project?
+> **MonARCH = Architecturally Monotonic Degradation + Hard-Gated Reversible Recovery + Two-Timescale Decoupling + Causal RUL Extrapolation + Ultra-Low-Footprint Edge C99 Deployment.**
 
-Battery health is not a single-timescale problem. Fast electrical behaviour within a cycle and slow degradation across hundreds of cycles contain different information.
+---
 
-MonARCH therefore separates them:
+## System Overview & Timescale Decoupling
 
-```text
-                 Lithium-ion battery telemetry
-                           │
-             ┌─────────────┴─────────────┐
-             │                           │
-       Intra-cycle                  Inter-cycle
-          dynamics                   degradation
-             │                           │
-             ▼                           ▼
-       SoC estimation              SLAC core
-                                         │
-                           ┌─────────────┴─────────────┐
-                           ▼                           ▼
-                    Irreversible D(t)          Recovery R(t)
-                    monotonic by design         hard-gated by rest
-                           │                           │
-                           └─────────────┬─────────────┘
-                                         ▼
-                              SoH = SoH₀ − D + R
-                                         │
-                                         ▼
-                              Causal RUL extrapolation
-```
-
-## Core Contributions
-
-### 1. Architecturally monotonic degradation
-
-The cumulative damage state is updated as:
+Battery telemetry operates across fundamentally different physical timescales: fast electrochemical responses within a single discharge cycle (seconds to minutes) and slow macroscopic capacity fade across aging cycles (weeks to years). MonARCH explicitly decouples these dynamics into a coordinated two-timescale architecture:
 
 ```text
-ΔD_t = λ * Softplus(f_θ(s_t))
-D_t  = D_(t-1) + ΔD_t
+                            Lithium-Ion Telemetry [V(t), I(t), T(t)]
+                                               │
+                   ┌───────────────────────────┴───────────────────────────┐
+                   ▼                                                       ▼
+        Micro-Timescale: Intra-Cycle                            Macro-Timescale: Inter-Cycle
+        Continuous State of Charge (SoC)                        Degradation & Recovery (SLAC Core)
+                   │                                                       │
+        Lightweight Sequence GRU                                ┌──────────┴──────────┐
+        [V(t), I(t), t]                                         ▼                     ▼
+                   │                                     Irreversible          Reversible
+                   ▼                                     Damage D(t)           Recovery R(t)
+        Coulomb-Normalized SoC(t)                        (Strictly             (Hard-Gated
+                                                          Monotonic)            by Rest)
+                                                                │                     │
+                                                                └──────────┬──────────┘
+                                                                           ▼
+                                                                  SoH = SoH₀ − D(t) + R(t)
+                                                                           │
+                                                                           ▼
+                                                                Causal RUL Extrapolation
+                                                                (Latent D(t) → Fail Threshold)
 ```
 
-Because the Softplus increment is strictly non-negative (`ΔD_t >= 0`) by construction, the cumulative damage trajectory cannot spontaneously decrease, ensuring physical degradation monotonicity across battery life.
+---
 
-### 2. Hard-gated recovery
+## Core Inductive Physics
 
-Battery relaxation after qualifying rest periods can produce apparent capacity recovery. MonARCH models this separately using a physical gating mechanism:
+### 1. Architecturally Monotonic Damage ($D_t$)
+Capacity fade caused by irreversible active material loss, solid-electrolyte interphase (SEI) layer growth, and lithium plating cannot spontaneously reverse. MonARCH structurally parameterizes the damage increment using a positive-definite activation:
 
-```text
-R_t = rest_flag_t * R_head(rest_features, h_t)
-```
+$$\Delta D_t = \lambda \cdot \text{Softplus}\big(f_\theta(s_t)\big) \ge 0, \qquad D_t = D_{t-1} + \Delta D_t$$
 
-If there was no qualifying rest event (`rest_flag_t == 0`), the recovery branch is structurally forced to zero, preventing the network from hallucinating unphysical capacity jumps during active cycling.
+where $\lambda = 0.003$, $s_t = [\bar{T}_{\text{cycle}}, \text{C-rate}]$ is the operational stressor vector, and $\text{Softplus}(u) = \ln(1 + e^u) > 0$. Because $\Delta D_t \ge 0$ unconditionally, cumulative degradation $D_t$ is strictly monotonic by design, eliminating unphysical degradation reversals.
 
-### 3. Two-timescale estimation
+### 2. Hard-Gated Reversible Recovery ($R_t$)
+Lithium-ion batteries undergo concentration homogenization and apparent capacity relaxation only after qualifying rest intervals. MonARCH enforces hard physical gating on the recovery head:
 
-- **Micro-timescale:** a lightweight GRU estimates continuous intra-cycle SoC from voltage/current/time sequences.
-- **Macro-timescale:** the Split-Latent Aging Core (SLAC) tracks degradation and recovery across cycles.
+$$R_t = \text{rest\_flag}_t \cdot R_{\text{head}}(\text{rest\_features}, h_t)$$
 
-### 4. Causal RUL prediction
+where $\text{rest\_flag}_t \in \{0, 1\}$. During continuous cycling with no rest period ($\text{rest\_flag}_t = 0$), the recovery term is structurally zero ($R_t \equiv 0$), preventing spurious capacity jumps.
 
-RUL is extrapolated from the learned monotonic damage trajectory toward an explicit end-of-life threshold rather than using future battery observations as hidden information.
+### 3. Causal Remaining Useful Life (RUL) Extrapolation
+Rather than training a regressor that observes the future or relies on arbitrary trajectory smoothing, MonARCH extrapolates the monotonic latent damage trajectory $D_{1:t}$ forward to the failure threshold:
 
-### 5. Edge-oriented implementation
+$$D_{\text{fail}} = \text{SoH}_0 - (1 - \text{EOL\_FADE\_FRACTION})$$
 
-The repository includes an exported ONNX model and a compact C99 streaming implementation targeting the **ESP32-S3 / Xtensa LX7**. The embedded state is designed around a **32-byte persistent state footprint**.
+Using a linear projection on the causal rolling damage history ($k=10$), MonARCH projects cycles remaining until $D_t \ge D_{\text{fail}}$ with zero future-cycle leakage.
 
-## Evaluation Strategy
+### 4. Ultra-Compact Edge Deployment (ESP32-S3 / C99)
+- **Persistent State:** Exactly **52 bytes** (`sizeof(pimdcnet_state_t)`: 4B $D_{t-1}$ + 40B rolling $D$ buffer + 4B cycle counter + 4B calibrated $\text{SoH}_0$).
+- **Compute Complexity:** 21,061 float32 parameters (82.27 KB Flash ROM) and 23,504 MACs per cycle step.
+- **Microcontroller Safety:** Peak stack frame of **4,960 bytes** (~4.84 KB, verified via GCC `-fstack-usage`), fitting comfortably into ESP32-S3 SRAM with zero heap allocation.
+- **Numerical Parity:** Exact bitwise match for $\text{SoH}$ and $D_t$ ($0.000$ difference) and $< 10^{-7}$ maximum absolute difference for $R_t$, SoC, and RUL against PyTorch.
 
-The project uses **Leave-One-Battery-Out (LOBO) cross-validation** on NASA PCoE battery-aging data: train on three cells and evaluate on the held-out cell.
+---
 
-It also includes comparisons against classical and neural baselines:
+## Empirical Benchmark & Verification Results
 
-- Coulomb counting
-- Extended Kalman Filter (EKF)
-- Random Forest
-- XGBoost
-- Vanilla LSTM
-- MonARCH / SLAC
+MonARCH and its baselines are evaluated under a strict **Leave-One-Battery-Out (LOBO)** protocol across **12 folds and 5 random seeds (60 runs per model)** over three benchmark datasets:
+1. **NASA PCoE:** 4 cylindrical 18650 cells (`B0005`, `B0006`, `B0007`, `B0018`) run-to-failure at 24°C.
+2. **CALCE (Univ. of Maryland):** 4 prismatic LCO cells (`CS2_35`, `CS2_36`, `CS2_37`, `CS2_38`) with 800+ extended cycles.
+3. **Oxford Battery Dataset:** 4 Kokam pouch cells (`Cell1`, `Cell2`, `Cell3`, `Cell4`) subjected to dynamic urban Artemis drive cycles.
 
-Architectural ablations test the contribution of:
+### 1. State of Health (SoH) Benchmark Across 12 Folds (Mean ± Std)
 
-- Cross-attention
-- Hard recovery gating
-- Monotonic damage construction
+| Model Category | Evaluation Paradigm | NASA SoH RMSE | CALCE SoH RMSE | Oxford SoH RMSE | Overall 12-Fold RMSE |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Persistence ($SOH_{t-1}$)** | 1-step lag baseline | 0.0090 ± 0.0030 | 0.0028 ± 0.0001 | 0.0048 ± 0.0001 | **0.0055 ± 0.0031** |
+| **Persistence + Drift** | Causal linear drift | 0.0089 ± 0.0030 | 0.0028 ± 0.0001 | 0.0041 ± 0.0003 | **0.0052 ± 0.0031** |
+| **Random Forest + lag** | Supervised lag regressor | 0.0198 ± 0.0084 | 0.0005 ± 0.0008 | 0.0008 ± 0.0001 | 0.0071 ± 0.0104 |
+| **XGBoost + lag** | Gradient boosted trees | 0.0237 ± 0.0061 | 0.0008 ± 0.0008 | 0.0013 ± 0.0002 | 0.0086 ± 0.0116 |
+| **MonARCH / PI-MDCNet** | Lag-conditioned | 0.0109 ± 0.0055 | 0.0045 ± 0.0004 | 0.0031 ± 0.0003 | **0.0062 ± 0.0045** |
+| **MonARCH / PI-MDCNet (C2)** | **Strict Open-Loop (Zero Test Labels)** | **0.0804 ± 0.0582** | **0.0173 ± 0.0011** | **0.0133 ± 0.0009** | **0.0370 ± 0.0442** |
 
-The repository also contains RUL validation, intra-cycle SoC evaluation, benchmark tables, and a forensic verification report.
+*Note on Evaluation Rigor:* As documented in [`artifacts/v5/REPORT.md`](artifacts/v5/REPORT.md), models conditioned on test-cell $SOH_{t-1}$ act as one-step filters. Under open-loop evaluation where no test-cell ground truth is ever provided, MonARCH tracks the full multi-hundred cycle capacity fade trajectory with an overall RMSE of 0.0370.
 
-## System Architecture
+### 2. NASA Remaining Useful Life (RUL) Prediction
 
-```text
-NASA PCoE battery data
-        │
-        ▼
-Feature extraction
-├── electrical statistics
-├── thermal statistics
-├── dQ/dV features
-├── 1-RC Thevenin parameters
-└── rest-event features
-        │
-        ▼
-┌──────────────────────────────────────────┐
-│              MonARCH / SLAC              │
-│                                          │
-│ Electrical Encoder ─┐                    │
-│                     ├─► Cross Attention  │
-│ Thermal Encoder ────┘         │          │
-│                               ├─► SoH    │
-│ Stressor ─► Monotonic D(t) ───┤          │
-│ Rest ─────► Gated R(t) ───────┤          │
-│                               ├─► RUL    │
-└───────────────────────────────┴──────────┘
-        │
-        ├──► Benchmarking & ablation
-        ├──► ONNX export
-        └──► ESP32-S3 C99 engine
-```
+Evaluated across 4 NASA test folds $\times$ 5 seeds (160 runs total) with uniform cycle normalization ($t / 1000$):
+
+| Evaluation Mode | Prognostic Extrapolation Method | Mean MAE (Cycles) | Mean RMSE (Cycles) | B0005 MAE | B0006 MAE | B0007 MAE | B0018 MAE |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Open-Loop (C2)** | **Latent $D_t$ Extrapolation (MonARCH)** | **7.02 ± 3.93** | **12.00 ± 6.65** | 8.09 | 9.94 | 8.84 | 1.23 |
+| | Neural RUL Head | 7.10 ± 5.27 | 12.43 ± 8.44 | 8.47 | 4.74 | 13.73 | 1.46 |
+| | Statistical Degradation Decomposition | 23.93 ± 22.86 | 41.65 ± 38.48 | 35.18 | 5.41 | 50.71 | 4.40 |
+| | Raw SoH Extrapolation | 24.26 ± 25.06 | 49.88 ± 51.39 | 42.94 | 4.19 | 48.73 | 1.16 |
+| **Lag-Conditioned** | Neural RUL Head | 6.88 ± 3.92 | 11.83 ± 6.59 | 8.32 | 4.95 | 11.60 | 2.63 |
+| | Latent $D_t$ Extrapolation | 9.44 ± 5.42 | 16.78 ± 7.85 | 12.03 | 5.16 | 15.84 | 4.73 |
+
+MonARCH's Latent $D_t$ extrapolation achieves a **$3.4\times$ reduction in RUL error** compared to standard statistical and raw-capacity extrapolation baselines (~7.0 cycles vs ~24.0 cycles MAE).
+
+### 3. Open-Loop Ablation Study (NASA Folds $\times$ 5 Seeds)
+
+| Architectural Variant | SoH RMSE | SoH MAE | RUL MAE (Cycles) | Monotonic $dD/dt \ge 0$ | Finding |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Full SLAC (MonARCH)** | 0.0804 ± 0.0582 | 0.0677 ± 0.0455 | **8.84 ± 2.57** | **Verified True** | Baseline reference |
+| **No Cross-Attention** | 0.0803 ± 0.0582 | 0.0676 ± 0.0454 | 8.85 ± 2.59 | **Verified True** | $p = 0.9274$ (neutral impact) |
+| **No Hard Gating** | 0.0503 ± 0.0378 | 0.0427 ± 0.0311 | 7.38 ± 1.44 | **Verified True** | Soft recovery provides lower fitting error |
+| **No Monotonicity** | 0.0624 ± 0.0207 | 0.0506 ± 0.0225 | **75.31 ± 47.21** | **Violated ($< 0$)** | **RUL error explodes $8.5\times$** |
+
+**Crucial Insight:** While unconstrained neural networks can slightly reduce one-step fitting loss by oscillating, removing architectural monotonicity destroys prognostic generalization—causing RUL MAE to explode from **8.84 to 75.31 cycles**. Inductive monotonicity is vital for long-term health forecasting.
+
+### 4. Continuous Intra-Cycle State of Charge (SoC) Tracking
+
+Continuous evaluation across operational discharge curves per battery aging tier:
+
+| Dataset | Aging Tier | Naive Static CC | Intra-Cycle GRU | SOH-Conditioned CC | Model-Free Lag CC |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **NASA** | Fresh ($\ge 90\%$) | 0.0425 ± 0.0094 | 0.0200 ± 0.0059 | 0.0074 ± 0.0022 | **0.0067 ± 0.0036** |
+| | Mid-Life ($80-90\%$) | 0.0887 ± 0.0032 | 0.0163 ± 0.0075 | 0.0074 ± 0.0035 | **0.0068 ± 0.0027** |
+| | Near-EOL ($< 80\%$) | 0.1774 ± 0.0250 | 0.0332 ± 0.0254 | 0.0084 ± 0.0030 | **0.0072 ± 0.0022** |
+| | **Overall** | 0.1427 ± 0.0245 | 0.0293 ± 0.0200 | 0.0083 ± 0.0025 | **0.0073 ± 0.0018** |
+| **Oxford** | Fresh ($\ge 90\%$) | 0.0375 ± 0.0009 | 0.0209 ± 0.0001 | **0.0028 ± 0.0003** | 0.0040 ± 0.0002 |
+| | Mid-Life ($80-90\%$) | 0.0907 ± 0.0005 | 0.0207 ± 0.0001 | **0.0029 ± 0.0002** | 0.0035 ± 0.0005 |
+| | Near-EOL ($< 80\%$) | 0.1336 ± 0.0007 | 0.0213 ± 0.0001 | **0.0026 ± 0.0006** | 0.0039 ± 0.0004 |
+| | **Overall** | 0.0917 ± 0.0012 | 0.0209 ± 0.0001 | **0.0028 ± 0.0001** | 0.0037 ± 0.0001 |
+
+Conditioning Coulomb counting on MonARCH's predicted SoH cuts near-EOL tracking error from **17.7% down to < 0.9%** by dynamically adjusting active cell capacity $Q_{\text{aged}} = \text{SoH}_t \cdot Q_{\text{nom}}$.
+
+---
 
 ## Repository Structure
 
 ```text
 .
-├── Architecture.md             # Detailed architecture & system specification
-├── Design.md                   # Design decisions and trade-offs
-├── PRD.md                      # Project requirements
-├── Phases.md                   # Development phases / status
-├── Rules.md                    # Development standards
+├── Architecture.md             # Complete system & cloud technical specification
+├── Design.md                   # Industrial UI design tokens & visual system
+├── PRD.md                      # Detailed project requirements document
+├── Rules.md                    # Engineering principles & anti-leakage standards
+├── .clangd                     # Clangd LSP configuration for embedded C toolchain
+├── compile_commands.json       # Compilation database for C99 embedded profiler
+├── pytest.ini                  # Pytest configuration
+├── requirements.txt            # Python dependencies
 │
-├── src/
-│   ├── data_loader.py          # NASA PCoE parsing + feature extraction
-│   ├── ecm_thevenin.py         # 1-RC ECM / EKF utilities
+├── src/                        # Core Python Modules
+│   ├── data_loader.py          # Multi-dataset parser (NASA, CALCE, Oxford) & ECM extraction
+│   ├── ecm_thevenin.py         # 1-RC equivalent circuit & online parameter identification
 │   └── models/
-│       ├── pi_mdcnet.py        # MonARCH / SLAC architecture
-│       ├── baselines.py        # Baseline models
-│       └── intracycle_soc.py   # Intra-cycle SoC GRU
+│       ├── pi_mdcnet.py        # MonARCH / SLAC neural network architecture
+│       ├── baselines.py        # Coulomb Counting, EKF, RF, XGBoost, LSTM baselines
+│       └── intracycle_soc.py   # Auxiliary intra-cycle continuous SoC GRU
 │
-├── experiments/
-│   ├── train.py                # LOBO training / benchmarking
-│   ├── ablation.py             # Component ablations
-│   ├── rul_validation.py       # Causal RUL validation
-│   ├── eval_rul_cell_breakdown.py
-│   ├── eval_naive_soc.py
-│   └── run_intracycle_soc.py
+├── experiments/                # Verification & Training Pipelines
+│   ├── protocol.py             # Centralized deterministic seeds, metrics & LOBO folds
+│   ├── train.py                # Unified training & evaluation with open-loop/recursive modes
+│   ├── ablation.py             # 4-way architectural ablation runner
+│   ├── rul_validation.py       # Multi-head RUL extrapolation validation
+│   ├── eval_rul_cell_breakdown.py # Per-cell RUL diagnostic breakdown
+│   ├── eval_naive_soc.py       # Zero-learning SoC comparator
+│   └── run_intracycle_soc.py   # High-frequency intra-cycle SoC evaluation
 │
-├── embedded/
-│   ├── export_onnx.py          # ONNX export + verification
-│   └── esp32/                  # C99 ESP32-S3 streaming engine
+├── embedded/                   # Edge C99 Deployment & ONNX Export
+│   ├── export_onnx.py          # PyTorch → ONNX FP32 & INT8 quantization + verification
+│   └── esp32/                  # Pure C99 BMS Streaming Engine
+│       ├── CMakeLists.txt      # ESP-IDF / Native CMake build configuration
+│       └── main/
+│           ├── pi_mdcnet_inference.h # 52-byte persistent state struct & API
+│           ├── pi_mdcnet_inference.c # C99 inference forward pass implementation
+│           ├── pi_mdcnet_weights.h   # Static weights header (21,061 float32 constants)
+│           └── main.c                # Xtensa LX7 240 MHz cycle profiler & harness
 │
-├── cloud/                      # Serverless fleet analytics pipeline
-├── dashboard/                  # Web monitoring dashboard
-├── artifacts/                  # Models, metrics, figures and reports
-├── scripts/                    # Dataset utilities
-└── tests/                      # Unit / integration tests
+├── scripts/                    # Automated Benchmark & Verification Scripts
+│   ├── download_data.py        # Automated multi-dataset downloader & cache verifier
+│   ├── run_v5_soc.py           # Continuous intra-cycle SoC benchmark runner
+│   ├── run_v5_rul.py           # RUL benchmark & per-cell trajectory figure generator
+│   ├── run_v5_c4_ablation.py   # Strict open-loop ablation verification
+│   └── run_v5_part_b_c.py      # Main 12-fold SoH benchmark runner
+│
+├── artifacts/                  # Benchmark Artifacts & Exported Models
+│   ├── pi_mdcnet_edge.onnx     # Streaming FP32 ONNX model (~133 KB)
+│   ├── pi_mdcnet_edge_int8.onnx# Quantized INT8 ONNX model (~125 KB)
+│   ├── forensic_verification_report.md # Comprehensive claim-by-claim forensic audit
+│   └── v5/                     # Latest Revision Benchmark Results
+│       ├── REPORT.md           # Full empirical verification report (Parts A-F)
+│       ├── soh_benchmark_summary.csv # 12-fold SoH summary across all models
+│       ├── rul_benchmark_summary.csv # Multi-mode RUL summary
+│       ├── soc_comparator_summary.csv# Intra-cycle SoC comparator summary
+│       ├── ablation_openloop_summary.csv # NASA open-loop ablation summary
+│       └── figures/            # High-resolution per-cell RUL vector curves (PDF/PNG)
+│
+├── cloud/                      # AWS Serverless Fleet Analytics Pipeline
+│   └── lambdas/                # Ingest, feature extraction, ONNX inference & API handlers
+├── dashboard/                  # Industrial dark-mode real-time telemetry dashboard
+└── tests/                      # Automated Test Suite (17 unit & integration tests)
 ```
 
-## Quick Start
+---
 
-### 1. Environment
+## Quick Start Guide
+
+### 1. Environment Setup
 
 ```bash
+# Clone repository
+git clone https://github.com/Saksham-239/MonARCH.git
+cd MonARCH
+
+# Create and activate virtual environment
 python -m venv .venv
+
+# On Linux / macOS:
 source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Windows PowerShell:
-
-```powershell
+# On Windows (PowerShell):
 .venv\Scripts\Activate.ps1
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Verify the dataset
+### 2. Download and Verify Datasets
+
+Automatically download, unpack, and verify checksums for NASA PCoE, CALCE, and Oxford battery datasets:
 
 ```bash
 python scripts/download_data.py
 ```
 
-### 3. Run tests
+### 3. Run Automated Tests
+
+Execute the unit and integration test suite:
 
 ```bash
 pytest tests/ -v
 ```
 
-### 4. Run experiments
+The test suite validates:
+- Architectural forward pass shapes and gradient flow.
+- Parameter-level non-negative damage monotonicity ($\Delta D_t \ge 0$).
+- Exact zero recovery gating during active cycling ($R_t \equiv 0$ when `rest_flag == 0`).
+- Strict test-label isolation under open-loop and recursive modes.
+- Numerical equivalence between the pure C99 engine, ONNX runtime, and PyTorch.
+
+### 4. Run Benchmark Suite
 
 ```bash
-python experiments/train.py
-python experiments/ablation.py
-python experiments/rul_validation.py
-python experiments/run_intracycle_soc.py
+# 1. Main SoH 12-fold benchmark across all models
+python scripts/run_v5_part_b_c.py
+
+# 2. Open-loop component ablation study
+python scripts/run_v5_c4_ablation.py
+
+# 3. RUL benchmark and per-cell trajectory figure generation
+python scripts/run_v5_rul.py
+
+# 4. Continuous intra-cycle SoC benchmark
+python scripts/run_v5_soc.py
 ```
 
-### 5. Export the edge model
+### 5. Build and Run the C99 Embedded Profiler
+
+Compile and run the standalone C99 streaming inference engine locally using any C99 compiler:
 
 ```bash
-python embedded/export_onnx.py
+# Compile host profiler
+gcc -O3 -fno-strict-aliasing embedded/esp32/main/main.c embedded/esp32/main/pi_mdcnet_inference.c -Iembedded/esp32/main -lm -o embedded/esp32_demo
+
+# Run the profiler
+./embedded/esp32_demo
 ```
 
-## Edge Deployment
+For ESP32-S3 deployment with ESP-IDF:
+```bash
+cd embedded/esp32
+idf.py set-target esp32s3
+idf.py build flash monitor
+```
 
-The embedded path is intentionally separate from the training stack:
+---
+
+## Serverless Cloud Fleet Architecture
+
+MonARCH includes an event-driven AWS serverless pipeline designed for zero idle cost ($0.00/month when no telemetry arrives):
 
 ```text
-PyTorch model
-     │
-     ▼
-ONNX export / verification
-     │
-     ▼
-~318 KB edge model
-     │
-     ▼
-ESP32-S3 / Xtensa LX7
-     │
-     ▼
-C99 streaming inference
+Battery Telemetry (MQTT)
+         │
+         ▼
+    AWS IoT Core  ──(SQL Rule)──►  AWS Lambda (Ingestion)
+                                          │
+                        ┌─────────────────┴─────────────────┐
+                        ▼                                   ▼
+             Amazon DynamoDB (Hot State)         Amazon S3 (Cold Telemetry)
+                        │                                   │
+                        └─────────────────┬─────────────────┘
+                                          ▼
+                               AWS Step Functions Orchestrator
+                                          │
+                               ┌──────────┴──────────┐
+                               ▼                     ▼
+                     Feature Extraction       ONNX Runtime Lambda
+                     (1-RC ECM & dQ/dV)       (pi_mdcnet_edge.onnx)
+                                                     │
+                               ┌─────────────────────┴─────────────────────┐
+                               ▼                                           ▼
+                      Amazon API Gateway                          Amazon SNS
+                      (REST Fleet Endpoints)                      (Thermal & EOL Alerts)
+                               │
+                               ▼
+                   Responsive Web Dashboard
 ```
 
-The embedded implementation is designed for constrained deployment rather than assuming a desktop Python runtime exists on the device.
+Complete configuration templates, CloudWatch alarm rules, and IAM policies are detailed in [`Architecture.md`](Architecture.md).
 
-## Cloud Fleet Architecture
+---
 
-The repository also contains a serverless fleet-analytics design for simulated battery telemetry:
+## Documentation & Audits
 
-**AWS IoT Core → Lambda → DynamoDB/S3 → Step Functions → ONNX inference → API Gateway → dashboard**, with CloudWatch/SNS-based monitoring and alerting.
+- [`Architecture.md`](Architecture.md) — Mathematical formulations, equivalent circuit models, and cloud infrastructure.
+- [`Design.md`](Design.md) — Visual telemetry design tokens, dark-mode styling, and user experience specs.
+- [`PRD.md`](PRD.md) — Project Requirements Document and engineering specifications.
+- [`Rules.md`](Rules.md) — Zero-leakage experimental protocols and anti-regression standards.
+- [`artifacts/v5/REPORT.md`](artifacts/v5/REPORT.md) — Complete 12-fold forensic verification report and empirical findings.
+- [`artifacts/forensic_verification_report.md`](artifacts/forensic_verification_report.md) — Claim-by-claim reproducibility audit.
 
-See [`Architecture.md`](Architecture.md) for the complete cloud and model architecture.
-
-## Technology
-
-**Python · PyTorch · NumPy · SciPy · Pandas · Scikit-learn · XGBoost · Optuna · ONNX Runtime · C99 · ESP32-S3 · AWS IoT Core · AWS Lambda · DynamoDB · S3 · Step Functions · API Gateway · Plotly**
-
-## Documentation
-
-- [`Architecture.md`](Architecture.md) — mathematical and system architecture
-- [`Design.md`](Design.md) — design rationale and trade-offs
-- [`PRD.md`](PRD.md) — requirements
-- [`Phases.md`](Phases.md) — implementation phases
-- [`artifacts/forensic_verification_report.md`](artifacts/forensic_verification_report.md) — claim-by-claim verification
+---
 
 ## License
 
-MIT License.
+This project is licensed under the [MIT License](LICENSE).
