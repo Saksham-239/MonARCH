@@ -334,14 +334,10 @@ Complete configuration templates, CloudWatch alarm rules, and IAM policies are d
 
 ---
 
-## Documentation & Audits
+## Documentation
 
 - [`Architecture.md`](Architecture.md) — Mathematical formulations, equivalent circuit models, and cloud infrastructure.
-- [`Design.md`](Design.md) — Visual telemetry design tokens, dark-mode styling, and user experience specs.
-- [`PRD.md`](PRD.md) — Project Requirements Document and engineering specifications.
-- [`Rules.md`](Rules.md) — Zero-leakage experimental protocols and anti-regression standards.
-- [`artifacts/v5/REPORT.md`](artifacts/v5/REPORT.md) — Complete 12-fold forensic verification report and empirical findings.
-- [`artifacts/forensic_verification_report.md`](artifacts/forensic_verification_report.md) — Claim-by-claim reproducibility audit.
+- [`artifacts/v5/REPORT.md`](artifacts/v5/REPORT.md) — Comprehensive v5 benchmark verification report and empirical findings.
 
 ---
 
