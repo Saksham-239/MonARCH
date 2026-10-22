@@ -43,7 +43,7 @@ typedef struct {
     float s_t[PIMDCNET_STRESSOR_DIM];       /**< Stressors: mean_temp, c_rate (2) */
     float rest_features[PIMDCNET_REST_DIM]; /**< Rest: duration (hrs), onset SoC, ambient temp (3) */
     float rest_flag;                        /**< Binary flag: 1.0 if rest >= threshold, else 0.0 */
-    float cycle_idx;                        /**< Normalized cycle index t / T_max */
+    float cycle_idx;                        /**< Normalized cycle index t / 1000.0 (fixed-horizon scale) */
 } pimdcnet_cycle_input_t;
 
 /**

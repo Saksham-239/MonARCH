@@ -53,6 +53,8 @@ class PredictionResult:
     soc: NDArray[np.float64]
     rul: NDArray[np.float64]
     wall_clock_seconds: float = 0.0
+    D_t: NDArray[np.float64] | None = None
+    R_t: NDArray[np.float64] | None = None
     """Training wall-clock time in seconds (spec correction #6)."""
 
 

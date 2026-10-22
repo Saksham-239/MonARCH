@@ -1,0 +1,5 @@
+dataset,method,mean_mae,std_mae,status,burn_in_prior
+NASA,Latent_Dt_Extrap,9.438362426857234,5.419951637385103,Evaluated (4/4 folds reach EOL),"max(0, 100 - t) for t < 10"
+NASA,Neural_RULHead,6.875416220411886,3.9202173638494564,Evaluated (4/4 folds reach EOL),"max(0, 100 - t) for t < 10"
+CALCE,Neural_RULHead,253.61060310427618,27.686240160500123,Evaluated (4/4 folds reach EOL),"max(0, 100 - t) for t < 10"
+Oxford,PI-MDCNet,,,Censored / Undefined (0/4 folds reach EOL; max fade ~25% < 30% cutoff; true RUL is all NaN),"max(0, 100 - t) for t < 10"

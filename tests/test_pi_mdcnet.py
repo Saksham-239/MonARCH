@@ -35,7 +35,7 @@ def dummy_inputs():
     rest_flag = torch.zeros(B, T, 1)
     rest_flag[:, [10, 25, 40], 0] = 1.0
 
-    cycle_idx = torch.linspace(0, 1, T).unsqueeze(0).repeat(B, 1).unsqueeze(-1)
+    cycle_idx = torch.arange(T, dtype=torch.float32).unsqueeze(0).repeat(B, 1).unsqueeze(-1) / 1000.0
     return {
         "x_elec": x_elec,
         "x_therm": x_therm,
@@ -212,6 +212,8 @@ def test_c_inference_numerical_parity():
     D_prev_pt = torch.tensor([[0.0]])
     D_hist_pt = torch.zeros(1, 10)
 
+    max_diffs = {"soh": 0.0, "soc": 0.0, "rul": 0.0, "D_t": 0.0, "R_t": 0.0}
+
     for step in range(15):
         c_in = CycleInput()
         x_e = torch.randn(1, 13)
@@ -219,7 +221,7 @@ def test_c_inference_numerical_parity():
         s_t = torch.abs(torch.randn(1, 2))
         r_feat = torch.randn(1, 3)
         r_fl = torch.tensor([[1.0 if step % 4 == 0 else 0.0]])
-        c_idx = torch.tensor([[step / 100.0]])
+        c_idx = torch.tensor([[step / 1000.0]])
 
         for i in range(13): c_in.x_elec[i] = x_e[0, i].item()
         for i in range(4): c_in.x_therm[i] = x_th[0, i].item()
@@ -240,12 +242,67 @@ def test_c_inference_numerical_parity():
         D_prev_pt = D_t_pt
         D_hist_pt = D_hist_next_pt
 
+        diff_soh = abs(out_c.soh - soh_pt.item())
+        diff_soc = abs(out_c.soc - soc_pt.item())
+        diff_rul = abs(out_c.rul - rul_pt.item())
+        diff_d_t = abs(out_c.D_t - D_t_pt.item())
+        diff_r_t = abs(out_c.R_t - R_t_pt.item())
+
+        max_diffs["soh"] = max(max_diffs["soh"], diff_soh)
+        max_diffs["soc"] = max(max_diffs["soc"], diff_soc)
+        max_diffs["rul"] = max(max_diffs["rul"], diff_rul)
+        max_diffs["D_t"] = max(max_diffs["D_t"], diff_d_t)
+        max_diffs["R_t"] = max(max_diffs["R_t"], diff_r_t)
+
         # Verify numerical equivalence within 1e-4
-        assert abs(out_c.soh - soh_pt.item()) < 1e-4, f"SoH mismatch at step {step}"
-        assert abs(out_c.soc - soc_pt.item()) < 1e-4, f"SoC mismatch at step {step}"
-        assert abs(out_c.rul - rul_pt.item()) < 1e-4, f"RUL mismatch at step {step}"
-        assert abs(out_c.D_t - D_t_pt.item()) < 1e-4, f"D_t mismatch at step {step}"
-        assert abs(out_c.R_t - R_t_pt.item()) < 1e-4, f"R_t mismatch at step {step}"
+        assert diff_soh < 1e-4, f"SoH mismatch at step {step}: {diff_soh}"
+        assert diff_soc < 1e-4, f"SoC mismatch at step {step}: {diff_soc}"
+        assert diff_rul < 1e-4, f"RUL mismatch at step {step}: {diff_rul}"
+        assert diff_d_t < 1e-4, f"D_t mismatch at step {step}: {diff_d_t}"
+        assert diff_r_t < 1e-4, f"R_t mismatch at step {step}: {diff_r_t}"
+
+
+def test_open_loop_and_recursive_label_isolation():
+    """Assert that test-cell SoH labels NEVER leak into open-loop or recursive forward passes."""
+    import pandas as pd
+    from experiments.train import predict_pimdcnet, FeatureScaler, ALL_INPUT_COLS
+
+    n_samples = 25
+    df_clean = pd.DataFrame(
+        np.random.randn(n_samples, len(ALL_INPUT_COLS)),
+        columns=ALL_INPUT_COLS,
+    )
+    df_clean["soh"] = np.linspace(1.0, 0.7, n_samples)
+    df_clean["soc_eod"] = 0.0
+    df_clean["rul"] = np.arange(n_samples, 0, -1, dtype=float)
+    df_clean["rest_flag"] = (np.arange(n_samples) % 5 == 0).astype(float)
+
+    scaler = FeatureScaler().fit([df_clean])
+    model = PIMDCNet(SLACConfig())
+    model.eval()
+
+    # Corrupted DataFrame with completely zeroed / randomized SoH labels
+    df_corrupted = df_clean.copy()
+    df_corrupted["soh"] = 0.0
+
+    # 1. Open-loop mode: predictions must be EXACTLY identical regardless of test SoH column
+    pred_open_clean = predict_pimdcnet(model, df_clean, scaler=scaler, eval_mode="open_loop")
+    pred_open_corrupt = predict_pimdcnet(model, df_corrupted, scaler=scaler, eval_mode="open_loop")
+    np.testing.assert_allclose(pred_open_clean.soh, pred_open_corrupt.soh, atol=1e-7,
+                               err_msg="Open-loop SoH prediction altered by test SoH column!")
+
+    # 2. Recursive mode: predictions must be EXACTLY identical regardless of test SoH column
+    pred_rec_clean = predict_pimdcnet(model, df_clean, scaler=scaler, eval_mode="recursive")
+    pred_rec_corrupt = predict_pimdcnet(model, df_corrupted, scaler=scaler, eval_mode="recursive")
+    np.testing.assert_allclose(pred_rec_clean.soh, pred_rec_corrupt.soh, atol=1e-7,
+                               err_msg="Recursive SoH prediction altered by test SoH column!")
+
+    # 3. In contrast, lag-conditioned mode MUST change when SoH is zeroed (proving soh_lag feeds it)
+    pred_lag_clean = predict_pimdcnet(model, df_clean, scaler=scaler, eval_mode="lag")
+    pred_lag_corrupt = predict_pimdcnet(model, df_corrupted, scaler=scaler, eval_mode="lag")
+    assert not np.allclose(pred_lag_clean.soh, pred_lag_corrupt.soh, atol=1e-4), (
+        "Lag mode should depend on true SoH labels."
+    )
 
 
 def test_onnx_fp32_and_int8_verification():

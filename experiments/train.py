@@ -47,6 +47,7 @@ from src.models.baselines import (
 from experiments.protocol import (
     BENCHMARK_EPOCHS,
     BENCHMARK_SEEDS,
+    CYCLE_NORMALIZATION_SCALE,
     benchmark_folds,
     extrapolate_damage_latent,
 )
@@ -203,8 +204,10 @@ class CycleSequenceDataset(Dataset):
         self,
         df: pd.DataFrame,
         scaler: FeatureScaler | None = None,
+        cycle_norm_scale: float | str | None = CYCLE_NORMALIZATION_SCALE,
     ) -> None:
         self.n = len(df)
+        self.cycle_norm_scale = cycle_norm_scale
 
         # Fill NaN for tensor conversion
         df_filled = df.fillna(0.0)
@@ -233,9 +236,13 @@ class CycleSequenceDataset(Dataset):
             df_filled["rest_flag"].values, dtype=torch.float32
         ).unsqueeze(-1)
 
-        # Normalized cycle index
-        max_idx = max(self.n - 1, 1)
-        self.cycle_idx = torch.arange(self.n, dtype=torch.float32).unsqueeze(-1) / max_idx
+        # Normalized cycle index (fixed horizon scale t/1000 by default, sequence_length available)
+        if cycle_norm_scale == "sequence_length":
+            max_idx = max(self.n - 1, 1)
+            self.cycle_idx = torch.arange(self.n, dtype=torch.float32).unsqueeze(-1) / max_idx
+        else:
+            scale = float(cycle_norm_scale) if cycle_norm_scale is not None else 1000.0
+            self.cycle_idx = torch.arange(self.n, dtype=torch.float32).unsqueeze(-1) / scale
 
         # Targets (NOT normalized -- these are in original SoH/SoC/RUL units)
         soh_raw = df["soh"].values
@@ -312,6 +319,8 @@ def train_pimdcnet(
     device: str = "auto",
     seed: int = 42,
     model_cls: type[PIMDCNet] = PIMDCNet,
+    open_loop: bool = False,
+    cycle_norm_scale: float | str | None = CYCLE_NORMALIZATION_SCALE,
 ) -> tuple[PIMDCNet, FeatureScaler, float]:
     """Train PI-MDCNet on a list of cell DataFrames.
 
@@ -326,6 +335,10 @@ def train_pimdcnet(
     seed : int
     model_cls : type[PIMDCNet]
         Model class to instantiate (defaults to PIMDCNet).
+    open_loop : bool
+        If True, train with soh_lag=None on cumulative damage/regen form.
+    cycle_norm_scale : float | str | None
+        Cycle index normalization scale (default 1000.0).
 
     Returns
     -------
@@ -353,7 +366,10 @@ def train_pimdcnet(
     scaler = FeatureScaler().fit(train_dfs)
 
     # Build datasets with normalization
-    datasets = [CycleSequenceDataset(df, scaler=scaler) for df in train_dfs]
+    datasets = [
+        CycleSequenceDataset(df, scaler=scaler, cycle_norm_scale=cycle_norm_scale)
+        for df in train_dfs
+    ]
     # Combine into a DataLoader with batch_size=1 (no zero padding, exact cell length)
     combined = torch.utils.data.ConcatDataset(datasets)
     loader = DataLoader(
@@ -377,6 +393,7 @@ def train_pimdcnet(
 
             optimizer.zero_grad()
 
+            soh_lag_in = None if open_loop else batch_dev.get("soh_lag", None)
             outputs = model(
                 x_elec=batch_dev["x_elec"],
                 x_therm=batch_dev["x_therm"],
@@ -384,7 +401,7 @@ def train_pimdcnet(
                 rest_features=batch_dev["rest_features"],
                 rest_flag=batch_dev["rest_flag"],
                 cycle_idx=batch_dev["cycle_idx"],
-                soh_lag=batch_dev.get("soh_lag", None),
+                soh_lag=soh_lag_in,
             )
 
             targets = {
@@ -434,18 +451,31 @@ def predict_pimdcnet(
     test_df: pd.DataFrame,
     scaler: FeatureScaler,
     device: str = "auto",
+    eval_mode: str = "lag",
+    cycle_norm_scale: float | str | None = CYCLE_NORMALIZATION_SCALE,
 ) -> PredictionResult:
-    """Run inference on test cell data."""
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    """Run inference on test cell data.
 
-    ds = CycleSequenceDataset(test_df, scaler=scaler)
+    eval_mode : str
+        'lag': lag-conditioned forward pass with true previous SoH (soh_lag).
+        'open_loop': open-loop forward pass using learned soh_0 (soh_lag=None).
+        'recursive': free-running recursive prediction feeding back own predictions only:
+                     soh_hat[t] = soh_hat[t-1] - dD_t + R_t, starting from soh_hat[0] = learned soh_0.
+    """
+    if device == "auto":
+        try:
+            device = next(model.parameters()).device
+        except (StopIteration, AttributeError):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    ds = CycleSequenceDataset(test_df, scaler=scaler, cycle_norm_scale=cycle_norm_scale)
     batch = ds[0]
     # Add batch dim
     batch_dev = {k: v.unsqueeze(0).to(device) for k, v in batch.items()}
 
     model.eval()
     with torch.no_grad():
+        soh_lag_in = None if eval_mode == "open_loop" else batch_dev.get("soh_lag", None)
         outputs = model(
             x_elec=batch_dev["x_elec"],
             x_therm=batch_dev["x_therm"],
@@ -453,11 +483,21 @@ def predict_pimdcnet(
             rest_features=batch_dev["rest_features"],
             rest_flag=batch_dev["rest_flag"],
             cycle_idx=batch_dev["cycle_idx"],
-            soh_lag=batch_dev.get("soh_lag", None),
+            soh_lag=soh_lag_in,
         )
 
     # Extract predictions
-    soh = outputs["soh"][0, :, 0].cpu().numpy()
+    if eval_mode == "recursive":
+        inc_seq = outputs["damage_increments"][0, :, 0].cpu().numpy()
+        R_seq = outputs["R_t"][0, :, 0].cpu().numpy()
+        n = len(test_df)
+        soh = np.zeros(n, dtype=np.float64)
+        soh[0] = float(model.soh_0.item())
+        for t in range(1, n):
+            soh[t] = soh[t - 1] - inc_seq[t] + R_seq[t]
+    else:
+        soh = outputs["soh"][0, :, 0].cpu().numpy()
+
     soc = outputs["soc"][0, :, 0].cpu().numpy()
 
     # Physics-informed Latent_Dt_Extrap as primary RUL prediction
@@ -471,7 +511,8 @@ def predict_pimdcnet(
         else:
             rul[t] = extrapolate_damage_latent(D_t_pred[: t + 1], soh_0=soh_0_pred)
 
-    return PredictionResult(soh=soh, soc=soc, rul=rul)
+    R_t_pred = outputs["R_t"][0, :, 0].cpu().numpy()
+    return PredictionResult(soh=soh, soc=soc, rul=rul, D_t=D_t_pred, R_t=R_t_pred)
 
 
 # =============================================================================

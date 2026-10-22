@@ -35,10 +35,16 @@ static inline uint64_t get_cpu_cycles(void) {
 }
 #endif
 
+#if defined(ESP_PLATFORM)
+void app_main(void) {
+#else
 int main(void) {
+#endif
     printf("================================================================================\n");
     printf("PI-MDCNET V4 SLAC: EMBEDDED BMS PROFILER & C99 INFERENCE BENCHMARK\n");
     printf("Target Architecture: ESP32-S3 / Xtensa LX7 (240 MHz) & Host BMS Controllers\n");
+    printf("Recommended Compiler Flags: -O3 -fno-strict-aliasing -ffunction-sections -fdata-sections\n");
+    printf("Timing Source: esp_cpu_get_cycle_count() (ESP32-S3 @ 240 MHz, 1 cycle = 4.167 ns)\n");
     printf("================================================================================\n\n");
 
     /* 1. Static Resource & Memory Accounting */
@@ -135,10 +141,20 @@ int main(void) {
     printf("  Architectural Monotonicity (dD/dt >= 0):  %s\n", monotonicity_holds ? "[VERIFIED: PASS]" : "[FAIL]");
     printf("  Hard-Gating Exactness (R_t = 0 w/o rest): %s\n", hard_gating_holds ? "[VERIFIED: PASS]" : "[FAIL]");
     printf("  Static State Persistence:                 [VERIFIED: 52 bytes persistent state]\n");
-    printf("  Average Host Execution Cycles:            %llu cycles / inference step\n",
+#if defined(ESP_PLATFORM)
+    uint64_t avg_cycles = total_cycles_elapsed / 20;
+    float avg_latency_us = (float)avg_cycles / 240.0f;
+    printf("  Measured ESP32-S3 CPU Cycles:             %llu cycles / inference step\n", (unsigned long long)avg_cycles);
+    printf("  Measured ESP32-S3 @ 240MHz Latency:       %.2f us\n", avg_latency_us);
+#else
+    printf("  Average Host Execution Cycles:            %llu cycles / inference step (x86 host)\n",
            (unsigned long long)(total_cycles_elapsed / 20));
-    printf("  Estimated ESP32-S3 @ 240MHz Latency:      ~450 - 650 microseconds (< 1 millisecond!)\n");
+    printf("  Target Device:                            ESP32-S3 / Xtensa LX7 (240 MHz)\n");
+    printf("  Note: On-device latency must be measured with an ESP32-S3 board flashed via ESP-IDF.\n");
+#endif
     printf("================================================================================\n");
 
+#if !defined(ESP_PLATFORM)
     return 0;
+#endif
 }
