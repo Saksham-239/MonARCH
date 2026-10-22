@@ -20,16 +20,16 @@ The system explicitly decouples battery dynamics into two operational timescales
 
 #### B. Macro-Timescale: Inter-Cycle Degradation & Regeneration (SLAC Core)
 * **Target:** Cycle-by-cycle State of Health ($\text{SoH}_t$) and Remaining Useful Life ($\text{RUL}$).
-* **Inputs:** Cycle electrical features $x_{\text{elec}}$ (13), thermal features $x_{\text{therm}}$ (4), stressor vector $s_t = [\text{mean\_temp\_cycle}, \text{c\_rate}]$ (2), rest features (3), rest flag, and normalized cycle index.
+* **Inputs:** Cycle electrical features $x_{\text{elec}}$ (13), thermal features $x_{\text{therm}}$ (4), stressor vector $s_t = [\bar{T}_{\text{cycle}}, \text{C-rate}]$ (mean cycle temperature, C-rate, 2), rest features (3), rest flag, and normalized cycle index.
 * **State Decomposition:**
   $$\text{SoH}_t = \text{SoH}_0 - D_t + R_t$$
 * **Architecturally Monotonic Damage ($D_t$):**
   $$\Delta D_t = \lambda \cdot \text{Softplus}(f_\theta(s_t)) > 0, \quad D_t = D_{t-1} + \Delta D_t$$
   where $\lambda = 0.003 > 0$. Since $\text{Softplus}(u) = \ln(1 + e^u) > 0$ for all finite $u$, $\Delta D_t > 0$ strictly, guaranteeing $D_t > D_{t-1}$ by parametric construction rather than relying on a soft penalty loss.
 * **Hard-Gated Reversible Relaxation ($R_t$):**
-  $$R_t = \text{rest\_flag}_t \cdot R_{\text{head}}(\text{rest\_features}, h_t)$$
+  $$R_t = \text{rest-flag}_t \cdot R_{\text{head}}(\text{rest-features}, h_t)$$
   guaranteeing $R_t \equiv 0.0$ on all active cycling cycles without rest.
-* **Causal RUL Extrapolation:** Extrapolated directly from the monotonic latent damage trajectory $D_t \to D_{\text{fail}} = \text{SoH}_0 - (1 - \text{EOL\_FADE\_FRACTION}) = \text{SoH}_0 - 0.20$ (standard 80% SoH threshold, 1.60 Ah, ensuring all cells including B0007 reach non-censored EOL) without seeing future cycle data.
+* **Causal RUL Extrapolation:** Extrapolated directly from the monotonic latent damage trajectory $D_t \to D_{\text{fail}} = \text{SoH}_0 - 0.20$ (using configured `EOL_FADE_FRACTION = 0.20`, standard 80% SoH threshold, 1.60 Ah, ensuring all cells including B0007 reach non-censored EOL) without seeing future cycle data.
 
 ```
 +--------------------------------------------------------------------------------------------------+

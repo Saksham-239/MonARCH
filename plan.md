@@ -302,7 +302,7 @@ gantt
   4. Outputs extracted:
      - $\text{SoH}_t = \text{SoH}_0 - D_t + R_t$
      - $\text{SoC}_{\text{eod}}$
-     - $\text{RUL}$ via causal linear extrapolation of $D_{1:t}$ toward $D_{\text{fail}} = \text{SoH}_0 - (1 - \text{EOL\_FADE\_FRACTION}) = \text{SoH}_0 - 0.20$ (standard 80% SoH threshold).
+     - $\text{RUL}$ via causal linear extrapolation of $D_{1:t}$ toward $D_{\text{fail}} = \text{SoH}_0 - 0.20$ (using configured `EOL_FADE_FRACTION = 0.20`, standard 80% SoH threshold).
      - Updated cumulative damage $D_t$ and rest relaxation $R_t$.
   5. Persist prediction object to DynamoDB `monarch_predictions`.
 

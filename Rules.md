@@ -31,10 +31,10 @@ WS# AI Operating Rules & Project Guardrails (Rules.md)
 * **NO "First Ever" Claims:** Prior work already separates degradation and regeneration (e.g., Qin et al. 2016) and enforces monotonicity via loss penalties or health indicators. The defensible contribution is the specific architectural enforcement of strictly positive cumulative damage increments rather than relying solely on soft loss penalties.
 * **Defensible Contributions Hierarchy:** Frame contributions strictly as:
   1. **Architecturally guaranteed monotonic damage** ($\Delta D_t > 0$ strictly via parameterization).
-  2. **Explicit latent decomposition** ($\text{SoH}_t = \text{SoH}_0 - D_t + R_t$) with hard-gated rest relaxation ($R_t = \text{rest\_flag}_t \cdot R_{\text{head}}$).
-  3. **Stressor-to-damage routing** ($s_t = [\text{mean\_temp\_cycle}, \text{c\_rate}]$).
+  2. **Explicit latent decomposition** ($\text{SoH}_t = \text{SoH}_0 - D_t + R_t$) with hard-gated rest relaxation ($R_t = \text{rest-flag}_t \cdot R_{\text{head}}$).
+  3. **Stressor-to-damage routing** ($s_t = [\bar{T}_{\text{cycle}}, \text{C-rate}]$).
   4. **Causal damage-latent RUL extrapolation** (evaluated honestly across valid cells: effective on accelerating-knee cell B0005, but not uniformly superior across all cells).
-  5. **Streaming BMS persistent-state design** (32 bytes static state, zero heap allocation).
+  5. **Streaming BMS persistent-state design** (52 bytes static state, zero heap allocation).
 
 ### 2.2 Electrochemical Fidelity: Relaxation vs. Degradation
 * **DO NOT** treat capacity regeneration after long rest periods as "sensor noise" or "an unphysical artifact."
